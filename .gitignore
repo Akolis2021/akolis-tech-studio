@@ -1,6 +1,7 @@
 node_modules/
-backend/data/store.json
+backend/data/
 backend/uploads/*
 backend/renders/*
+backend/logs/
 .env
 .DS_Store
