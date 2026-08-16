@@ -1,0 +1,14 @@
+{
+  "name": "akolis-tech-studio-api",
+  "version": "0.7.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "busboy": "^1.6.0",
+    "rss-parser": "^3.13.0"
+  }
+}

@@ -1,0 +1,6 @@
+node_modules/
+backend/data/store.json
+backend/uploads/*
+backend/renders/*
+.env
+.DS_Store

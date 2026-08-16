@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Akolis Tech Studio — V2</title>
+  <meta name="description" content="Personal faceless-tech content intelligence and production dashboard.">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <span class="eyebrow">AKOLIS TECH STUDIO</span>
+      <h1>Content Command Center</h1>
+      <p class="topbar-subtitle">Discover → Research → Produce → Repurpose → Publish</p>
+    </div>
+    <div class="topbar-actions">
+      <button id="addSourceBtn" class="secondary-btn">+ Add Source</button>
+      <button id="refreshFeedsBtn" class="primary-btn">↻ Refresh Feeds</button>
+    </div>
+  </header>
+
+  <main class="container">
+    <section class="stats-grid">
+      <article class="stat-card"><span>Stories</span><strong id="storyCount">0</strong><small id="storyFreshness">0 new</small></article>
+      <article class="stat-card"><span>Sources</span><strong id="sourceCount">0</strong><small id="activeSourceCount">0 active</small></article>
+      <article class="stat-card"><span>Projects</span><strong id="projectCount">0</strong><small id="productionCount">0 in production</small></article>
+      <article class="stat-card"><span>Top Opportunities</span><strong id="highPotentialCount">0</strong><small>score ≥ 80</small></article>
+    </section>
+
+    <section class="panel">
+      <div class="panel-heading">
+        <div>
+          <span class="eyebrow">DISCOVER</span>
+          <h2>Story Radar</h2>
+        </div>
+        <div class="toolbar">
+          <input id="storySearch" type="search" placeholder="Search stories, sources, angles...">
+          <select id="topicFilter">
+            <option value="all">All topics</option>
+            <option value="AI">AI</option>
+            <option value="Developer">Developer</option>
+            <option value="Startups">Startups</option>
+            <option value="Cloud">Cloud</option>
+            <option value="Cybersecurity">Cybersecurity</option>
+            <option value="Hardware">Hardware</option>
+          </select>
+          <select id="storyStatusFilter">
+            <option value="all">All statuses</option>
+            <option value="New">New</option>
+            <option value="Research">Research</option>
+            <option value="Used">Used</option>
+            <option value="Archived">Archived</option>
+          </select>
+        </div>
+      </div>
+      <div id="storyList" class="story-list"></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-heading">
+        <div>
+          <span class="eyebrow">SOURCES</span>
+          <h2>Source Manager</h2>
+        </div>
+        <div class="meta">Feeds are stored locally in V2. Backend fetching comes next.</div>
+      </div>
+      <div id="sourceList" class="source-list"></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-heading">
+        <div>
+          <span class="eyebrow">PRODUCTION</span>
+          <h2>Projects</h2>
+        </div>
+      </div>
+      <div id="projectList" class="project-list"></div>
+    </section>
+  </main>
+
+  <div id="projectModal" class="modal hidden" aria-hidden="true">
+    <div class="modal-card">
+      <button class="close-btn" data-close="projectModal" aria-label="Close">×</button>
+      <span class="eyebrow">NEW PROJECT</span>
+      <h2>Create a content project</h2>
+      <form id="projectForm">
+        <label>
+          Project title
+          <input id="projectTitle" required placeholder="e.g. OpenAI just changed AI coding">
+        </label>
+        <label>
+          Video angle
+          <textarea id="projectAngle" required placeholder="What original question or perspective will this video answer?"></textarea>
+        </label>
+        <label>
+          Target length
+          <select id="projectLength">
+            <option>Short</option>
+            <option selected>6–8 minutes</option>
+            <option>8–12 minutes</option>
+            <option>12+ minutes</option>
+          </select>
+        </label>
+        <button class="primary-btn" type="submit">Create Project</button>
+      </form>
+    </div>
+  </div>
+
+  <div id="sourceModal" class="modal hidden" aria-hidden="true">
+    <div class="modal-card">
+      <button class="close-btn" data-close="sourceModal" aria-label="Close">×</button>
+      <span class="eyebrow">SOURCE</span>
+      <h2>Add a content source</h2>
+      <form id="sourceForm">
+        <label>
+          Source name
+          <input id="sourceName" required placeholder="TechCrunch">
+        </label>
+        <label>
+          Feed URL
+          <input id="sourceUrl" required type="url" placeholder="https://example.com/feed.xml">
+        </label>
+        <label>
+          Source type
+          <select id="sourceType">
+            <option value="rss">RSS / Atom</option>
+            <option value="api">API</option>
+            <option value="website">Website</option>
+            <option value="manual">Manual</option>
+          </select>
+        </label>
+        <label>
+          Default topic
+          <select id="sourceTopic">
+            <option value="AI">AI</option>
+            <option value="Developer">Developer</option>
+            <option value="Startups">Startups</option>
+            <option value="Cloud">Cloud</option>
+            <option value="Cybersecurity">Cybersecurity</option>
+            <option value="Hardware">Hardware</option>
+          </select>
+        </label>
+        <button class="primary-btn" type="submit">Save Source</button>
+      </form>
+    </div>
+  </div>
+
+  <div id="storyModal" class="modal hidden" aria-hidden="true">
+    <div class="modal-card wide">
+      <button class="close-btn" data-close="storyModal" aria-label="Close">×</button>
+      <span class="eyebrow">STORY INTELLIGENCE</span>
+      <h2 id="storyDetailTitle"></h2>
+      <div id="storyDetailBody" class="story-detail"></div>
+      <div class="modal-actions">
+        <button id="researchStoryBtn" class="secondary-btn">Research Story</button>
+        <button id="useStoryFromDetailBtn" class="primary-btn">Create Project</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="researchStudioModal" class="modal hidden" aria-hidden="true">
+    <div class="modal-card research-wide">
+      <button class="close-btn" data-close="researchStudioModal" aria-label="Close">×</button>
+      <div class="research-header">
+        <div>
+          <span class="eyebrow">V4 · RESEARCH STUDIO</span>
+          <h2 id="researchTitle">Research Story</h2>
+          <p id="researchSubtitle" class="modal-subtitle"></p>
+        </div>
+        <div class="research-score" id="researchScore">—</div>
+      </div>
+
+      <div class="research-tabs">
+        <button class="research-tab active" data-tab="brief">Brief</button>
+        <button class="research-tab" data-tab="sources">Sources</button>
+        <button class="research-tab" data-tab="claims">Claims</button>
+        <button class="research-tab" data-tab="angles">Angles</button>
+      </div>
+
+      <div id="researchPanelBrief" class="research-panel">
+        <div class="research-grid">
+          <div class="detail-block">
+            <strong>What happened?</strong>
+            <textarea id="researchWhatHappened" placeholder="Describe the event in plain language."></textarea>
+          </div>
+          <div class="detail-block">
+            <strong>Why it matters</strong>
+            <textarea id="researchWhyMatters" placeholder="Why should your audience care?"></textarea>
+          </div>
+          <div class="detail-block">
+            <strong>Developer impact</strong>
+            <textarea id="researchDeveloperImpact" placeholder="What changes for developers?"></textarea>
+          </div>
+          <div class="detail-block">
+            <strong>Limitations / caveats</strong>
+            <textarea id="researchCaveats" placeholder="What is uncertain, overstated, missing or limited?"></textarea>
+          </div>
+        </div>
+        <div class="modal-actions">
+          <button id="saveResearchBtn" class="secondary-btn">Save Brief</button>
+          <button id="generateResearchBtn" class="primary-btn">Generate Research Draft</button>
+        </div>
+      </div>
+
+      <div id="researchPanelSources" class="research-panel hidden">
+        <div class="source-add-row">
+          <input id="researchSourceUrl" type="url" placeholder="https://example.com/original-announcement">
+          <select id="researchSourceRole">
+            <option value="primary">Primary source</option>
+            <option value="secondary">Secondary source</option>
+            <option value="reference">Reference</option>
+          </select>
+          <button id="addResearchSourceBtn" class="secondary-btn">Add Source</button>
+        </div>
+        <div id="researchSourceList" class="research-source-list"></div>
+      </div>
+
+      <div id="researchPanelClaims" class="research-panel hidden">
+        <div class="claim-add-row">
+          <input id="claimText" placeholder="A factual claim you may use in the video">
+          <select id="claimConfidence">
+            <option value="high">High confidence</option>
+            <option value="medium">Medium confidence</option>
+            <option value="low">Low confidence</option>
+          </select>
+          <button id="addClaimBtn" class="secondary-btn">Add Claim</button>
+        </div>
+        <div id="claimList" class="claim-list"></div>
+      </div>
+
+      <div id="researchPanelAngles" class="research-panel hidden">
+        <div class="angle-heading">
+          <div>
+            <strong>Original editorial angles</strong>
+            <p class="meta">Choose one perspective before moving into Script Studio.</p>
+          </div>
+          <button id="generateAnglesBtn" class="secondary-btn">Generate Angles</button>
+        </div>
+        <div id="angleList" class="angle-list"></div>
+        <div class="approved-angle">
+          <strong>Approved angle</strong>
+          <textarea id="approvedAngle" placeholder="Your final editorial angle"></textarea>
+          <button id="saveAngleBtn" class="primary-btn">Approve & Save Angle</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+
+  <div id="scriptStudioModal" class="modal hidden" aria-hidden="true">
+    <div class="modal-card script-wide">
+      <button class="close-btn" data-close="scriptStudioModal" aria-label="Close">×</button>
+      <div class="research-header">
+        <div><span class="eyebrow">V5 · SCRIPT STUDIO</span><h2 id="scriptTitle">Script Studio</h2><p id="scriptSubtitle" class="modal-subtitle"></p></div>
+        <div class="research-score" id="scriptDuration">—</div>
+      </div>
+      <div class="research-tabs">
+        <button class="script-tab active" data-tab="overview">Overview</button>
+        <button class="script-tab" data-tab="script">Script</button>
+        <button class="script-tab" data-tab="scenes">Scenes</button>
+        <button class="script-tab" data-tab="assets">Assets</button>
+        <button class="script-tab" data-tab="prompts">Flow Prompts</button>
+      </div>
+      <div id="scriptPanelOverview" class="script-panel">
+        <div class="research-grid">
+          <div class="detail-block"><strong>Approved angle</strong><textarea id="scriptApprovedAngle"></textarea></div>
+          <div class="detail-block"><strong>Target audience</strong><textarea id="scriptAudience">Developers and tech enthusiasts</textarea></div>
+          <div class="detail-block"><strong>Target duration (minutes)</strong><input id="scriptTargetMinutes" type="number" min="1" max="30" step="0.5" value="7"></div>
+          <div class="detail-block"><strong>Voice / tone</strong><select id="scriptTone"><option value="clear-analytical">Clear & analytical</option><option value="fast-news">Fast tech-news</option><option value="conversational">Conversational</option><option value="documentary">Documentary</option></select></div>
+        </div>
+        <div class="modal-actions"><button id="saveScriptSettingsBtn" class="secondary-btn">Save Settings</button><button id="generateScriptBtn" class="primary-btn">Generate Script Package</button></div>
+        <div id="scriptGenerationNote" class="notice-box"></div>
+      </div>
+      <div id="scriptPanelScript" class="script-panel hidden">
+        <div class="script-toolbar"><span class="meta" id="scriptWordCount"></span><span class="meta" id="scriptReadTime"></span><button id="saveScriptBtn" class="secondary-btn">Save Script</button></div>
+        <label>Title<input id="scriptMainTitle"></label>
+        <label>Hook<textarea id="scriptHook" class="script-box"></textarea></label>
+        <label>Main narration<textarea id="scriptNarration" class="script-box large-script"></textarea></label>
+        <label>Outro / CTA<textarea id="scriptOutro" class="script-box"></textarea></label>
+      </div>
+      <div id="scriptPanelScenes" class="script-panel hidden"><div class="scene-toolbar"><button id="addSceneBtn" class="secondary-btn">+ Add Scene</button><button id="regenerateScenesBtn" class="secondary-btn">Regenerate Scene Plan</button></div><div id="sceneList" class="scene-list"></div></div>
+      <div id="scriptPanelAssets" class="script-panel hidden"><div class="asset-summary" id="assetSummary"></div><div id="assetChecklist" class="asset-checklist"></div></div>
+      <div id="scriptPanelPrompts" class="script-panel hidden"><p class="meta">Prompts are prepared for manual use in Google Flow. V5 does not automate Flow.</p><div id="flowPromptList" class="flow-prompt-list"></div></div>
+    </div>
+  </div>
+  <div id="productionStudioModal" class="modal hidden" aria-hidden="true">
+    <div class="modal-card production-wide">
+      <button class="close-btn" data-close="productionStudioModal" aria-label="Close">×</button>
+
+      <div class="research-header">
+        <div>
+          <span class="eyebrow">V6 · PRODUCTION STUDIO</span>
+          <h2 id="productionTitle">Production Studio</h2>
+          <p id="productionSubtitle" class="modal-subtitle"></p>
+        </div>
+        <div class="research-score" id="productionReadiness">—</div>
+      </div>
+
+      <div class="research-tabs">
+        <button class="production-tab active" data-tab="timeline">Timeline</button>
+        <button class="production-tab" data-tab="assets">Assets</button>
+        <button class="production-tab" data-tab="render">Render</button>
+      </div>
+
+      <div id="productionPanelTimeline" class="production-panel">
+        <div id="productionSceneList" class="scene-list"></div>
+      </div>
+
+      <div id="productionPanelAssets" class="production-panel hidden">
+        <div class="upload-zone" id="assetUploadZone">
+          <input id="assetFileInput" type="file" multiple hidden>
+          <strong>Drop footage, screenshots, audio or images here</strong>
+          <span class="meta">Files are stored locally in your browser in V6 metadata; actual binary persistence comes next.</span>
+          <button id="chooseAssetBtn" class="secondary-btn">Choose Files</button>
+        </div>
+        <div id="productionAssetList" class="production-asset-list"></div>
+      </div>
+
+      <div id="productionPanelRender" class="production-panel hidden">
+        <div class="render-summary" id="renderSummary"></div>
+        <pre id="renderManifest" class="render-manifest"></pre>
+        <div class="modal-actions">
+          <button id="downloadManifestBtn" class="secondary-btn">Download Render Manifest</button>
+          <button id="prepareRenderBtn" class="primary-btn">Prepare Render Package</button>
+        </div>
+        <div id="renderNote" class="notice-box">
+          V7 can upload assets and create render jobs. FFmpeg must be installed on the server for actual rendering.
+        </div>
+        <div id="renderJobs" class="render-jobs"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast"></div>
+  <script src="app.js"></script>
+</body>
+</html>
