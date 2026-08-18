@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Akolis Tech Studio — V2</title>
+  <title>Akolis Tech Studio — V8</title>
   <meta name="description" content="Personal faceless-tech content intelligence and production dashboard.">
   <link rel="stylesheet" href="styles.css">
 </head>
@@ -290,7 +290,7 @@
 
       <div class="research-header">
         <div>
-          <span class="eyebrow">V6 · PRODUCTION STUDIO</span>
+          <span class="eyebrow">V8 · MEDIA ENGINE</span>
           <h2 id="productionTitle">Production Studio</h2>
           <p id="productionSubtitle" class="modal-subtitle"></p>
         </div>
@@ -300,39 +300,98 @@
       <div class="research-tabs">
         <button class="production-tab active" data-tab="timeline">Timeline</button>
         <button class="production-tab" data-tab="assets">Assets</button>
+        <button class="production-tab" data-tab="mix">Mix</button>
         <button class="production-tab" data-tab="render">Render</button>
       </div>
 
       <div id="productionPanelTimeline" class="production-panel">
+        <p class="meta" style="margin-bottom:14px">
+          Each scene needs its own footage and voiceover clip. Voiceover length sets the scene's
+          exact duration and auto-generates timed captions — edit anything after generating.
+        </p>
         <div id="productionSceneList" class="scene-list"></div>
       </div>
 
       <div id="productionPanelAssets" class="production-panel hidden">
         <div class="upload-zone" id="assetUploadZone">
           <input id="assetFileInput" type="file" multiple hidden>
-          <strong>Drop footage, screenshots, audio or images here</strong>
-          <span class="meta">Files are stored locally in your browser in V6 metadata; actual binary persistence comes next.</span>
+          <strong>Drop footage or images here</strong>
+          <span class="meta">General b-roll not tied to a specific scene. Use a scene's "Attach Footage" / "Attach Voiceover" buttons on the Timeline tab to assign per-scene media.</span>
           <button id="chooseAssetBtn" class="secondary-btn">Choose Files</button>
         </div>
         <div id="productionAssetList" class="production-asset-list"></div>
       </div>
 
+      <div id="productionPanelMix" class="production-panel hidden">
+        <div class="mix-section">
+          <h3>Background music</h3>
+          <div class="upload-zone" id="musicUploadZone">
+            <input id="musicFileInput" type="file" accept="audio/*" hidden>
+            <strong>Drop a music track here</strong>
+            <span class="meta">Loops and trims to the final video length automatically, mixed under your voiceover.</span>
+            <button id="chooseMusicBtn" class="secondary-btn">Choose Audio File</button>
+          </div>
+          <div id="musicCurrentTrack" class="meta" style="margin-top:10px"></div>
+          <div class="mix-controls">
+            <label>Volume
+              <input id="musicVolume" type="range" min="0" max="1" step="0.05" value="0.15">
+            </label>
+            <label class="checkbox-label">
+              <input id="musicEnabled" type="checkbox" checked> Include music in render
+            </label>
+            <button id="saveMusicSettingsBtn" class="secondary-btn">Save Music Settings</button>
+          </div>
+        </div>
+
+        <div class="mix-section">
+          <h3>Transitions &amp; framing</h3>
+          <div class="mix-controls">
+            <label>Scene transition
+              <select id="transitionSelect">
+                <option value="cut">Hard cut</option>
+                <option value="crossfade">Crossfade</option>
+              </select>
+            </label>
+            <label>Crossfade duration (seconds)
+              <input id="transitionDuration" type="number" min="0.1" max="2" step="0.1" value="0.5">
+            </label>
+            <label>Vertical/square framing
+              <select id="cropModeSelect">
+                <option value="pad">Pad (letterbox, keeps full frame)</option>
+                <option value="crop">Crop to fill (no bars, may crop edges)</option>
+              </select>
+            </label>
+            <button id="saveMixSettingsBtn" class="secondary-btn">Save Framing Settings</button>
+          </div>
+        </div>
+      </div>
+
       <div id="productionPanelRender" class="production-panel hidden">
         <div class="render-summary" id="renderSummary"></div>
+        <label style="display:block;margin:14px 0">Render preset
+          <select id="renderPresetSelect">
+            <option value="long-form">YouTube Long-form (16:9)</option>
+            <option value="short">YouTube Shorts (9:16) — uses scenes marked "Include in Short"</option>
+            <option value="square">Square (1:1)</option>
+          </select>
+        </label>
         <pre id="renderManifest" class="render-manifest"></pre>
         <div class="modal-actions">
           <button id="downloadManifestBtn" class="secondary-btn">Download Render Manifest</button>
-          <button id="prepareRenderBtn" class="primary-btn">Prepare Render Package</button>
+          <button id="prepareRenderBtn" class="primary-btn">Queue Render</button>
         </div>
         <div id="renderNote" class="notice-box">
-          V7 can upload assets and create render jobs. FFmpeg must be installed on the server for actual rendering.
+          Renders run through FFmpeg on the server: per-scene captions and overlays, transitions, and background music are all applied automatically.
         </div>
         <div id="renderJobs" class="render-jobs"></div>
       </div>
     </div>
   </div>
 
+
   <div id="toast" class="toast"></div>
-  <script src="app.js"></script>
+  <input id="sceneFootageFileInput" type="file" accept="video/*,image/*" hidden>
+  <input id="sceneVoiceoverFileInput" type="file" accept="audio/*" hidden>
+  <script type="module" src="js/app.js"></script>
 </body>
 </html>

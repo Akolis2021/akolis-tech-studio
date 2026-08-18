@@ -1,15 +1,24 @@
 import http from "node:http";
 import fs from "node:fs/promises";
+import { createWriteStream } from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import Parser from "rss-parser";
+import Busboy from "busboy";
+
+const execFileAsync = promisify(execFile);
 
 const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const ROOT = path.resolve(__dirname, "..");
-const DATA_DIR = path.join(__dirname, "data");
-const DATA_FILE = path.join(DATA_DIR, "store.json");
+const __dirname  = path.dirname(__filename);
+const ROOT        = path.resolve(__dirname, "..");
+const DATA_DIR    = path.join(__dirname, "data");
+const DATA_FILE   = path.join(DATA_DIR, "store.json");
+const UPLOADS_DIR = path.join(__dirname, "uploads");
+const RENDERS_DIR = path.join(__dirname, "renders");
+const TMP_DIR      = path.join(__dirname, "tmp");
 const PORT = Number(process.env.PORT || 3000);
 
 const parser = new Parser({
@@ -26,14 +35,25 @@ const DEFAULT_SOURCES = [
 ];
 
 async function ensureStore() {
-  await fs.mkdir(DATA_DIR, { recursive: true });
+  await fs.mkdir(DATA_DIR,    { recursive: true });
+  await fs.mkdir(UPLOADS_DIR, { recursive: true });
+  await fs.mkdir(RENDERS_DIR, { recursive: true });
+  await fs.mkdir(TMP_DIR,     { recursive: true });
   try { await fs.access(DATA_FILE); }
   catch {
     await writeStore({
-      sources: DEFAULT_SOURCES.map(s => ({ ...s, addedAt: new Date().toISOString() })),
-      stories: []
+      sources:    DEFAULT_SOURCES.map(s => ({ ...s, addedAt: new Date().toISOString() })),
+      stories:    [],
+      projects:   [],
+      renderJobs: []
     });
   }
+  // Migrate existing stores that pre-date projects / renderJobs fields.
+  const store = await readStore();
+  let dirty = false;
+  if (!store.projects)   { store.projects   = []; dirty = true; }
+  if (!store.renderJobs) { store.renderJobs = []; dirty = true; }
+  if (dirty) await writeStore(store);
 }
 
 async function readStore() {
@@ -155,6 +175,124 @@ function getStoryOrThrow(store, id) {
   story.researchSources ||= [];
   story.claims ||= [];
   return story;
+}
+
+// ── V8 Media Engine: render presets & content-aware helpers ──────────────────
+
+const RENDER_PRESETS = {
+  "long-form": { width: 1920, height: 1080, cropMode: "pad",  useShortHighlights: false, label: "YouTube Long-form (16:9)" },
+  "short":     { width: 1080, height: 1920, cropMode: "crop", useShortHighlights: true,  label: "YouTube Shorts (9:16)" },
+  "square":    { width: 1080, height: 1080, cropMode: "crop", useShortHighlights: false, label: "Square (1:1)" }
+};
+
+// Detects video/audio/image/file from the MIME type, falling back to file
+// extension when the browser or client sends a generic type (e.g. some
+// voice-recorder exports and curl's default MIME guessing use
+// application/octet-stream for common formats like .m4a).
+const EXT_MEDIA_TYPES = {
+  mp4: "video", mov: "video", webm: "video", mkv: "video", avi: "video",
+  mp3: "audio", wav: "audio", m4a: "audio", aac: "audio", ogg: "audio", flac: "audio",
+  jpg: "image", jpeg: "image", png: "image", webp: "image", gif: "image"
+};
+function detectMediaType(mimeType, filename) {
+  if (mimeType.startsWith("video")) return "video";
+  if (mimeType.startsWith("audio")) return "audio";
+  if (mimeType.startsWith("image")) return "image";
+  const ext = path.extname(filename).slice(1).toLowerCase();
+  return EXT_MEDIA_TYPES[ext] || "file";
+}
+
+// Probes a media file's duration in seconds via ffprobe. Returns null on failure.
+async function ffprobeDuration(filePath) {
+  try {
+    const { stdout } = await execFileAsync("ffprobe", [
+      "-v", "quiet", "-show_entries", "format=duration", "-of", "csv=p=0", filePath
+    ]);
+    const seconds = parseFloat(stdout.trim());
+    return Number.isFinite(seconds) ? seconds : null;
+  } catch {
+    return null;
+  }
+}
+
+// Escapes text for safe use inside an ffmpeg drawtext filter argument.
+function escapeDrawtext(text = "") {
+  return String(text)
+    .replace(/\\/g, "\\\\\\\\")
+    .replace(/:/g, "\\:")
+    .replace(/'/g, "\u2019")   // drawtext can't escape single quotes reliably; use a typographic apostrophe
+    .replace(/%/g, "\\%")
+    .replace(/\n/g, " ");
+}
+
+// Splits narration text into caption chunks (~7 words each) and distributes
+// them proportionally across the scene duration by word count. This is a
+// simple, deterministic timing model — not real forced alignment — but it
+// keeps captions roughly in sync with the voiceover without requiring ASR.
+function buildCaptionChunks(text = "", durationSeconds = 0) {
+  const words = String(text).trim().split(/\s+/).filter(Boolean);
+  if (!words.length || !durationSeconds) return [];
+
+  const CHUNK_SIZE = 7;
+  const chunks = [];
+  for (let i = 0; i < words.length; i += CHUNK_SIZE) {
+    chunks.push(words.slice(i, i + CHUNK_SIZE).join(" "));
+  }
+
+  const totalWords = words.length;
+  let cursorWords = 0;
+  let cursorTime = 0;
+  return chunks.map(chunk => {
+    const chunkWords = chunk.split(/\s+/).length;
+    const start = cursorTime;
+    cursorWords += chunkWords;
+    const end = (cursorWords / totalWords) * durationSeconds;
+    cursorTime = end;
+    return { text: chunk, start: Number(start.toFixed(2)), end: Number(end.toFixed(2)) };
+  });
+}
+
+// Builds the chained drawtext filter string for a scene's captions + overlays.
+// Captions render as a bottom-anchored subtitle bar; overlays render as a
+// large centered title (top third) or a lower-third banner, each windowed
+// to its own [start, end] using ffmpeg's enable='between(t,a,b)'.
+function buildDrawtextFilters(scene) {
+  const filters = [];
+
+  if (scene.captionsEnabled !== false) {
+    for (const cap of scene.captions || []) {
+      if (!cap.text) continue;
+      filters.push(
+        `drawtext=text='${escapeDrawtext(cap.text)}':fontsize=42:fontcolor=white:` +
+        `box=1:boxcolor=black@0.55:boxborderw=14:x=(w-text_w)/2:y=h-160:` +
+        `enable='between(t,${cap.start},${cap.end})'`
+      );
+    }
+  }
+
+  for (const overlay of scene.overlays || []) {
+    if (!overlay.text) continue;
+    const isTitle = overlay.type === "title";
+    const style = isTitle
+      ? `fontsize=64:fontcolor=white:box=1:boxcolor=black@0.35:boxborderw=18:x=(w-text_w)/2:y=h*0.12`
+      : `fontsize=38:fontcolor=white:box=1:boxcolor=black@0.65:boxborderw=12:x=60:y=h-260`;
+    filters.push(
+      `drawtext=text='${escapeDrawtext(overlay.text)}':${style}:` +
+      `enable='between(t,${overlay.start ?? 0},${overlay.end ?? 999})'`
+    );
+  }
+
+  return filters;
+}
+
+// Returns the FFmpeg version string (first line) or null if not found.
+async function detectFfmpeg() {
+  try {
+    const { stdout } = await execFileAsync("ffmpeg", ["-version"]);
+    return stdout.split("\n")[0].trim() || "detected";
+  } catch {
+    return null;
+  }
 }
 
 async function fetchSourceMetadata(url) {
@@ -281,6 +419,179 @@ function buildScenes(story,script) {
   }));
 }
 
+// Async FFmpeg worker — updates job status in the store, runs off the request cycle.
+async function _runRender(jobId, story, presetKey) {
+  const store = await readStore();
+  const job   = store.renderJobs.find(j => j.id === jobId);
+  if (!job) return;
+
+  const updateJob = async (patch) => {
+    Object.assign(job, patch);
+    await writeStore(store);
+  };
+
+  const preset = RENDER_PRESETS[presetKey] || RENDER_PRESETS["long-form"];
+  const { width, height, cropMode, useShortHighlights } = preset;
+  const warnings = [];
+
+  await updateJob({ status: "processing", startedAt: new Date().toISOString(), progress: 5, warnings });
+
+  const jobTmpDir = path.join(TMP_DIR, jobId);
+  await fs.mkdir(jobTmpDir, { recursive: true });
+
+  try {
+    const allScenes = story.script?.scenes || [];
+    // Short-format renders use only scenes marked includeInShort, if any are marked;
+    // otherwise fall back to the full scene list (cropped to the short frame).
+    const scenes = (useShortHighlights && allScenes.some(s => s.includeInShort))
+      ? allScenes.filter(s => s.includeInShort)
+      : allScenes;
+
+    if (!scenes.length) {
+      return await updateJob({ status: "error", error: "No scenes available to render.", progress: 0, warnings });
+    }
+
+    const assets = story.production?.assets || [];
+    const cropFilter = cropMode === "crop"
+      ? `scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height}`
+      : `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2`;
+
+    // ── Step 1: render each scene to its own normalized clip (video, audio, captions, overlays burned in) ──
+    const sceneClips = [];
+    for (let i = 0; i < scenes.length; i++) {
+      const scene = scenes[i];
+      const footageAsset =
+        assets.find(a => a.role === "footage" && a.sceneId === scene.id && a.mediaType === "video") ||
+        assets.find(a => a.role === "footage" && a.sceneId === scene.id && a.mediaType === "image");
+      const voiceoverAsset = assets.find(a => a.role === "voiceover" && a.sceneId === scene.id);
+
+      if (!footageAsset) {
+        warnings.push(`Scene ${i + 1} ("${scene.title || "Untitled"}") has no footage asset — skipped.`);
+        continue;
+      }
+      const duration = voiceoverAsset?.duration || scene.durationSeconds || 4;
+      if (!voiceoverAsset) {
+        warnings.push(`Scene ${i + 1} has no voiceover — using a ${duration}s fallback duration with silent audio.`);
+      }
+
+      const vf = [cropFilter, ...buildDrawtextFilters(scene)].join(",");
+      const clipPath = path.join(jobTmpDir, `scene-${i}.mp4`);
+      const args = ["-y"];
+
+      if (footageAsset.mediaType === "image") args.push("-loop", "1", "-i", footageAsset.path);
+      else                                     args.push("-stream_loop", "-1", "-i", footageAsset.path);
+
+      if (voiceoverAsset) args.push("-i", voiceoverAsset.path);
+      else                args.push("-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo");
+
+      args.push(
+        "-t", String(duration),
+        "-vf", vf,
+        "-map", "0:v", "-map", "1:a",
+        "-c:v", "libx264", "-preset", "fast", "-crf", "23", "-pix_fmt", "yuv420p", "-r", "30",
+        "-c:a", "aac", "-shortest",
+        clipPath
+      );
+
+      await execFileAsync("ffmpeg", args);
+      const actualDuration = (await ffprobeDuration(clipPath)) || duration;
+      sceneClips.push({ path: clipPath, duration: actualDuration });
+      await updateJob({ progress: 5 + Math.round(((i + 1) / scenes.length) * 45) });
+    }
+
+    if (!sceneClips.length) {
+      return await updateJob({ status: "error", error: "No scenes could be rendered — every scene is missing footage.", progress: 0, warnings });
+    }
+
+    // ── Step 2: concatenate scene clips (plain cut, or crossfade transition) ──
+    const transition         = story.production?.transition || "cut";
+    const transitionDuration = Math.max(0.1, Number(story.production?.transitionDuration || 0.5));
+    const concatPath = path.join(jobTmpDir, "concat.mp4");
+    let totalDuration;
+
+    if (transition === "crossfade" && sceneClips.length > 1) {
+      const inputArgs = [];
+      sceneClips.forEach(c => inputArgs.push("-i", c.path));
+
+      const filterParts = [];
+      let cumulative   = sceneClips[0].duration;
+      let lastVideoTag = "0:v";
+      let lastAudioTag = "0:a";
+      for (let i = 1; i < sceneClips.length; i++) {
+        const offset = Math.max(0, cumulative - transitionDuration);
+        const vTag = `v${i}`, aTag = `a${i}`;
+        filterParts.push(`[${lastVideoTag}][${i}:v]xfade=transition=fade:duration=${transitionDuration}:offset=${offset.toFixed(2)}[${vTag}]`);
+        filterParts.push(`[${lastAudioTag}][${i}:a]acrossfade=d=${transitionDuration}[${aTag}]`);
+        lastVideoTag = vTag; lastAudioTag = aTag;
+        cumulative = cumulative + sceneClips[i].duration - transitionDuration;
+      }
+      totalDuration = cumulative;
+
+      await execFileAsync("ffmpeg", [
+        "-y", ...inputArgs,
+        "-filter_complex", filterParts.join(";"),
+        "-map", `[${lastVideoTag}]`, "-map", `[${lastAudioTag}]`,
+        "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+        "-c:a", "aac",
+        concatPath
+      ]);
+    } else {
+      const listFile = path.join(jobTmpDir, "concat.txt");
+      const lines = sceneClips.map(c => `file '${c.path.replaceAll("'", "'\\''")}'`).join("\n");
+      await fs.writeFile(listFile, lines, "utf8");
+      totalDuration = sceneClips.reduce((sum, c) => sum + c.duration, 0);
+
+      await execFileAsync("ffmpeg", [
+        "-y", "-f", "concat", "-safe", "0", "-i", listFile,
+        "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+        "-c:a", "aac",
+        concatPath
+      ]);
+    }
+    await updateJob({ progress: 70 });
+
+    // ── Step 3: mix in background music (looped/trimmed, attenuated) if configured ──
+    const music      = story.production?.music;
+    const musicAsset = music?.enabled && music?.assetId ? assets.find(a => a.id === music.assetId) : null;
+    let finalPath = concatPath;
+
+    if (musicAsset) {
+      const mixedPath = path.join(jobTmpDir, "mixed.mp4");
+      const volume = Math.max(0, Math.min(1, Number(music.volume ?? 0.15)));
+      await execFileAsync("ffmpeg", [
+        "-y",
+        "-i", concatPath,
+        "-stream_loop", "-1", "-i", musicAsset.path,
+        "-filter_complex",
+        `[1:a]volume=${volume},atrim=0:${totalDuration.toFixed(2)}[music];` +
+        `[0:a][music]amix=inputs=2:duration=first:dropout_transition=0[a]`,
+        "-map", "0:v", "-map", "[a]",
+        "-c:v", "copy", "-c:a", "aac",
+        mixedPath
+      ]);
+      finalPath = mixedPath;
+    }
+    await updateJob({ progress: 90 });
+
+    // ── Step 4: finalize output ──
+    const outDir  = path.join(RENDERS_DIR, story.id);
+    await fs.mkdir(outDir, { recursive: true });
+    const outFile = path.join(outDir, `${jobId}-${presetKey}.mp4`);
+    await fs.copyFile(finalPath, outFile);
+    await fs.rm(jobTmpDir, { recursive: true, force: true }).catch(() => {});
+
+    await updateJob({
+      status:      "done",
+      progress:    100,
+      completedAt: new Date().toISOString(),
+      outputUrl:   `/media/renders/${story.id}/${path.basename(outFile)}`,
+      warnings
+    });
+  } catch (error) {
+    await updateJob({ status: "error", error: error.message, progress: 0, warnings });
+  }
+}
+
 async function handleApi(req, res) {
   const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
   const pathname = url.pathname;
@@ -294,8 +605,16 @@ async function handleApi(req, res) {
     return res.end();
   }
 
-  if (req.method === "GET" && pathname === "/api/health")
-    return json(res, 200, { ok: true, service: "akolis-tech-studio-api", version: "0.4.0", time: new Date().toISOString() });
+  if (req.method === "GET" && pathname === "/api/health") {
+    const ffmpeg = await detectFfmpeg();
+    return json(res, 200, {
+      ok: true,
+      service: "akolis-tech-studio-api",
+      version: "0.7.0",
+      time: new Date().toISOString(),
+      ffmpeg: ffmpeg ? { detected: true, version: ffmpeg } : { detected: false, version: null }
+    });
+  }
 
   const store = await readStore();
 
@@ -352,9 +671,10 @@ async function handleApi(req, res) {
     const story = getStoryOrThrow(store, decodeURIComponent(storyMatch[1]));
     const data = await body(req);
     if (typeof data.angle === "string") story.angle = data.angle;
-    if (data.research) story.research = { ...story.research, ...data.research };
-    if (data.script) story.script = { ...(story.script || {}), ...data.script };
     if (typeof data.status === "string") story.status = data.status;
+    if (data.research)   story.research   = { ...story.research,              ...data.research };
+    if (data.script)     story.script     = { ...(story.script     || {}),    ...data.script };
+    if (data.production) story.production = { ...(story.production || {}),    ...data.production };
     await writeStore(store);
     return json(res, 200, story);
   }
@@ -459,6 +779,238 @@ async function handleApi(req, res) {
 
   if (req.method === "POST" && pathname === "/api/feeds/refresh")
     return json(res, 200, await refreshFeeds());
+
+  // ── Projects ────────────────────────────────────────────────────────────────
+
+  if (req.method === "GET" && pathname === "/api/projects")
+    return json(res, 200, store.projects || []);
+
+  if (req.method === "POST" && pathname === "/api/projects") {
+    const data = await body(req);
+    if (!data.title) return json(res, 400, { error: "title is required" });
+    const project = {
+      id:            data.id || crypto.randomUUID(),
+      title:         String(data.title).trim(),
+      angle:         String(data.angle || "").trim(),
+      length:        data.length  || "6–8 minutes",
+      status:        data.status  || "Planning",
+      progress:      data.progress ?? 5,
+      sourceStoryId: data.sourceStoryId || null,
+      createdAt:     data.createdAt || new Date().toISOString()
+    };
+    store.projects.unshift(project);
+    await writeStore(store);
+    return json(res, 201, project);
+  }
+
+  const projectMatch = pathname.match(/^\/api\/projects\/([^/]+)$/);
+  if (projectMatch) {
+    const id    = decodeURIComponent(projectMatch[1]);
+    const index = (store.projects || []).findIndex(p => p.id === id);
+    if (index < 0) return json(res, 404, { error: "Project not found" });
+
+    if (req.method === "PATCH") {
+      const data = await body(req);
+      store.projects[index] = { ...store.projects[index], ...data };
+      await writeStore(store);
+      return json(res, 200, store.projects[index]);
+    }
+    if (req.method === "DELETE") {
+      const deleted = store.projects.splice(index, 1)[0];
+      await writeStore(store);
+      return json(res, 200, deleted);
+    }
+  }
+
+  // ── Production asset upload ──────────────────────────────────────────────────
+
+  const uploadMatch = pathname.match(/^\/api\/stories\/([^/]+)\/production\/upload$/);
+  if (uploadMatch && req.method === "POST") {
+    const storyId = decodeURIComponent(uploadMatch[1]);
+    const story   = getStoryOrThrow(store, storyId);
+    const dir     = path.join(UPLOADS_DIR, storyId);
+    await fs.mkdir(dir, { recursive: true });
+
+    const uploaded = await new Promise((resolve, reject) => {
+      const bb = Busboy({ headers: req.headers });
+      let meta = {};
+      let saved = null;
+      let writeDone = Promise.resolve();
+
+      bb.on("field", (name, val) => { meta[name] = val; });
+      bb.on("file",  (fieldname, fileStream, info) => {
+        const { filename, mimeType } = info;
+        const safe = path.basename(filename).replace(/[^a-zA-Z0-9._-]/g, "_");
+        const dest = path.join(dir, `${Date.now()}-${safe}`);
+        const writeStream = createWriteStream(dest);
+        writeDone = new Promise((res, rej) => {
+          writeStream.on("finish", res);
+          writeStream.on("error", rej);
+        });
+        saved = { dest, filename: safe, mimeType };
+        fileStream.pipe(writeStream);
+      });
+      bb.on("finish", async () => {
+        try { await writeDone; resolve({ meta, saved }); }
+        catch (err) { reject(err); }
+      });
+      bb.on("error",  reject);
+      req.pipe(bb);
+    });
+
+    if (!uploaded.saved) return json(res, 400, { error: "No file received." });
+
+    const { dest, filename, mimeType } = uploaded.saved;
+    const stat = await fs.stat(dest);
+    // role: 'footage' (default, video/image b-roll) | 'voiceover' (per-scene narration audio) | 'music' (global background track)
+    const role = ["footage", "voiceover", "music"].includes(uploaded.meta.role) ? uploaded.meta.role : "footage";
+    const mediaType = detectMediaType(mimeType, filename);
+
+    // Audio/video assets get their duration probed immediately — this drives
+    // scene timing (for voiceover) and looping/trimming (for music).
+    const duration = (mediaType === "audio" || mediaType === "video")
+      ? await ffprobeDuration(dest)
+      : null;
+
+    const asset = {
+      id:            crypto.randomUUID(),
+      fileName:      filename,
+      path:          dest,
+      url:           `/media/uploads/${storyId}/${path.basename(dest)}`,
+      mediaType,
+      role,
+      duration,
+      size:          stat.size,
+      status:        "ready",
+      source:        "creator",
+      sceneId:       uploaded.meta.sceneId       || null,
+      requirementId: uploaded.meta.requirementId || null,
+      uploadedAt:    new Date().toISOString()
+    };
+
+    story.production         ||= { assets: [] };
+    story.production.assets  ||= [];
+    story.production.assets.push(asset);
+
+    if (role === "voiceover" && asset.sceneId) {
+      // Voiceover duration becomes the scene's authoritative duration, and
+      // captions are auto-generated from the scene's own narration text,
+      // timed proportionally across that duration. Editable afterward.
+      const scenes = story.script?.scenes || [];
+      const scene  = scenes.find(s => s.id === asset.sceneId);
+      if (scene) {
+        scene.voiceoverAssetId = asset.id;
+        scene.durationSeconds  = asset.duration || scene.durationSeconds || 0;
+        scene.captions         = buildCaptionChunks(scene.voiceover || "", scene.durationSeconds);
+        if (scene.captionsEnabled === undefined) scene.captionsEnabled = true;
+      }
+    }
+
+    if (role === "music") {
+      story.production.music = {
+        assetId: asset.id,
+        volume:  story.production.music?.volume ?? 0.15,
+        enabled: true
+      };
+    }
+
+    await writeStore(store);
+    return json(res, 200, story);
+  }
+
+  // Update global music mix settings (volume / enabled) without re-uploading.
+  const musicSettingsMatch = pathname.match(/^\/api\/stories\/([^/]+)\/production\/music$/);
+  if (musicSettingsMatch && req.method === "PATCH") {
+    const story = getStoryOrThrow(store, decodeURIComponent(musicSettingsMatch[1]));
+    const data  = await body(req);
+    story.production ||= { assets: [] };
+    story.production.music = { ...(story.production.music || {}), ...data };
+    await writeStore(store);
+    return json(res, 200, story);
+  }
+
+  // Regenerate captions for a scene from its current narration + stored duration.
+  const captionsGenerateMatch = pathname.match(/^\/api\/stories\/([^/]+)\/script\/scenes\/([^/]+)\/captions\/generate$/);
+  if (captionsGenerateMatch && req.method === "POST") {
+    const story  = getStoryOrThrow(store, decodeURIComponent(captionsGenerateMatch[1]));
+    const sceneId = decodeURIComponent(captionsGenerateMatch[2]);
+    const scene  = (story.script?.scenes || []).find(s => s.id === sceneId);
+    if (!scene) return json(res, 404, { error: "Scene not found" });
+    scene.captions = buildCaptionChunks(scene.voiceover || "", scene.durationSeconds || 0);
+    scene.captionsEnabled = true;
+    await writeStore(store);
+    return json(res, 200, story);
+  }
+
+  if (req.method === "GET" && pathname === "/api/render-presets") {
+    const presets = Object.entries(RENDER_PRESETS).map(([key, p]) => ({ key, ...p }));
+    return json(res, 200, presets);
+  }
+
+  const renderMatch = pathname.match(/^\/api\/stories\/([^/]+)\/render$/);
+  if (renderMatch) {
+    const storyId = decodeURIComponent(renderMatch[1]);
+
+    if (req.method === "GET") {
+      const jobs = (store.renderJobs || []).filter(j => j.storyId === storyId);
+      return json(res, 200, jobs);
+    }
+
+    if (req.method === "POST") {
+      const story  = getStoryOrThrow(store, storyId);
+      const data   = await body(req);
+      const presetKey = RENDER_PRESETS[data.format] ? data.format : "long-form";
+
+      const job = {
+        id:          crypto.randomUUID(),
+        storyId,
+        format:      presetKey,
+        presetLabel: RENDER_PRESETS[presetKey].label,
+        status:      "queued",
+        progress:    0,
+        warnings:    [],
+        createdAt:   new Date().toISOString(),
+        startedAt:   null,
+        completedAt: null,
+        outputUrl:   null,
+        error:       null
+      };
+      store.renderJobs ||= [];
+      store.renderJobs.unshift(job);
+      await writeStore(store);
+
+      // Run FFmpeg asynchronously — do not await.
+      _runRender(job.id, story, presetKey).catch(err =>
+        console.error("Render error for job", job.id, err.message)
+      );
+
+      return json(res, 202, { job });
+    }
+  }
+
+  // ── Media serving ────────────────────────────────────────────────────────────
+
+  if (req.method === "GET" && pathname.startsWith("/media/uploads/")) {
+    const rel  = pathname.replace("/media/uploads/", "");
+    const safe = path.normalize(path.join(UPLOADS_DIR, rel));
+    if (!safe.startsWith(UPLOADS_DIR)) return json(res, 403, { error: "Forbidden" });
+    try {
+      const file = await fs.readFile(safe);
+      res.writeHead(200, { "Content-Type": "application/octet-stream" });
+      return res.end(file);
+    } catch { return json(res, 404, { error: "Not found" }); }
+  }
+
+  if (req.method === "GET" && pathname.startsWith("/media/renders/")) {
+    const rel  = pathname.replace("/media/renders/", "");
+    const safe = path.normalize(path.join(RENDERS_DIR, rel));
+    if (!safe.startsWith(RENDERS_DIR)) return json(res, 403, { error: "Forbidden" });
+    try {
+      const file = await fs.readFile(safe);
+      res.writeHead(200, { "Content-Type": "video/mp4" });
+      return res.end(file);
+    } catch { return json(res, 404, { error: "Not found" }); }
+  }
 
   return json(res, 404, { error: "API route not found" });
 }

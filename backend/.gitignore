@@ -3,3 +3,4 @@ data/store.json
 .env
 uploads/*
 renders/*
+tmp/*

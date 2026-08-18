@@ -31,59 +31,37 @@ Backend:
 - JSON persistence
 - FFmpeg command-line integration
 
-## V7 status
+## V8 status
 
-Implemented:
+Implemented and verified end-to-end (real render, real output file, inspected with ffprobe/ffmpeg):
 
-- V6 production planning.
-- Actual multipart binary asset upload.
-- Per-story upload folder.
-- Asset metadata persistence.
-- Asset scene/requirement assignment at upload.
-- `/media/uploads/...` media serving.
-- Render job creation.
-- Render job status.
-- FFmpeg availability detection.
-- Long-form render job.
-- Short render option.
-- `/media/renders/...` output serving.
-- Render job persistence.
+- Role-based asset uploads: `footage`, `voiceover`, `music` (each tagged on upload via a `role` field).
+- Automatic media-type detection with a file-extension fallback for when the client sends a generic MIME type.
+- Automatic duration probing (`ffprobe`) on audio/video uploads.
+- Voiceover-driven scene timing: attaching a voiceover to a scene sets `scene.durationSeconds` from the clip's real length. This is a **separate field** from `scene.duration`, which stays the free-text display string used by earlier UI (e.g. `"0:00–0:10"`) — don't conflate the two.
+- Auto-generated captions on voiceover attach: narration text is split into ~7-word chunks and timed proportionally across `durationSeconds`. This is a simple proportional model, not real forced alignment — timing is approximate but close enough to be usable, and fully editable/regeneratable afterward (`POST /api/stories/:id/script/scenes/:sceneId/captions/generate`).
+- Title and lower-third text overlays per scene, each with its own `[start, end]` window, burned in via `drawtext`.
+- Scene transitions: hard cut (concat demuxer) or crossfade (`xfade`/`acrossfade`, configurable duration).
+- Background music: looped/trimmed to the final video length, mixed at a configurable volume under the voiceover (constant attenuation, not true sidechain ducking — see "Known simplifications" below).
+- Crop mode: `pad` (letterbox, keeps full frame) or `crop` (fill frame, may crop edges) — set per project, applied to every scene.
+- Render presets: `long-form` (1920×1080), `short` (1080×1920), `square` (1080×1080). `GET /api/render-presets` exposes them to the frontend.
+- Short highlight selection: scenes can be flagged `includeInShort`; a Short-preset render uses only flagged scenes if any exist, otherwise falls back to the full scene list.
+- Render job warnings: scenes missing footage are skipped with a warning surfaced in the job status rather than silently failing the whole render; scenes missing voiceover render with a fallback duration and silent audio.
 
-## V7 render scope
+Full Production Studio UI: per-scene footage/voiceover attach buttons, caption preview + regenerate + enable toggle, overlay add/remove, Include-in-Short checkbox, a dedicated Mix tab (music upload + volume + transition + crop mode), and a render-preset selector on the Render tab.
 
-The first renderer is intentionally conservative:
+## Known simplifications (intentional, for a later pass if needed)
 
-- takes uploaded video assets assigned to scenes
-- concatenates them in scene order
-- scales/pads to target output size
-- encodes H.264 MP4
-
-Long-form:
-- 1920x1080
-
-Short:
-- 1080x1920
-
-This is not yet the final editor.
-
-Not yet implemented:
-
-- voiceover synchronization
-- captions
-- music mixing
-- scene transitions
-- text overlays
-- automatic Flow footage generation
-- intelligent scene trimming
-- AI-selected clip timing
-
-Those belong in later media-engine milestones.
+- **Captions are not ASR-aligned.** They're the scripted narration text split evenly by word count across the voiceover's real duration. If the voice reads unevenly (long pauses, etc.), caption timing will drift from the actual speech. Good enough for a first pass; real alignment would need a speech-to-text step.
+- **Music "ducking" is a constant volume reduction**, not real sidechain compression against the voiceover. It doesn't dynamically dip lower only when someone's speaking.
+- **One footage clip and one voiceover clip per scene, no B-roll layering within a scene.** Multiple assets per scene aren't composited together yet.
+- **Scene-level asset requirements from V5's script generation (Flow prompts) are separate from V8's direct footage/voiceover attach flow.** Both exist in the data model; V8 didn't wire Flow-prompt-driven asset requirements into the render pipeline, only direct scene attach.
 
 ## FFmpeg requirement
 
-The machine running the backend must have `ffmpeg` available on PATH.
+The machine running the backend must have `ffmpeg` and `ffprobe` available on PATH.
 
-`GET /api/health` reports whether FFmpeg is detected.
+`GET /api/health` reports the detected FFmpeg version.
 
 ## Run
 
@@ -105,24 +83,21 @@ Uploaded files are stored under:
 
 Rendered files are stored under:
 
-`backend/renders/`
+`backend/renders/<story-id>/`
+
+Intermediate per-scene render files during a render job live under `backend/tmp/<job-id>/` and are deleted after the job completes.
 
 These folders are ignored by git.
 
-## Next milestone — V8 Editor
+## Next milestone — V9 (not yet scoped)
 
-V8 should make the render genuinely content-aware:
+Candidates, not committed to:
 
-1. voiceover upload
-2. automatic narration duration
-3. scene timing
-4. background music
-5. captions
-6. title/lower-third overlays
-7. transitions
-8. aspect-ratio-aware cropping
-9. Short highlight selection
-10. render presets
+- Real forced-alignment captions (speech-to-text timestamped)
+- True sidechain music ducking
+- Multi-asset compositing within a single scene
+- Wire V5's Flow-prompt asset requirements into the V8 render pipeline
+- Render preview player inline in Production Studio (rather than only a download link)
 
 ## AI collaboration rule
 
