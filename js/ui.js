@@ -42,7 +42,16 @@ export function renderStories() {
     .sort((a, b) => (b.score || 0) - (a.score || 0));
 
   list.innerHTML = stories.length
-    ? stories.map(story => `
+    ? stories.map(story => {
+        const hasAngle  = !!(story.research?.approvedAngle || story.angle);
+        const sceneCount = story.script?.scenes?.length || 0;
+        const readyScenes = sceneCount
+          ? story.script.scenes.filter(s =>
+              (story.production?.assets || []).some(a => a.role === "footage" && a.sceneId === s.id) &&
+              (story.production?.assets || []).some(a => a.role === "voiceover" && a.sceneId === s.id)
+            ).length
+          : 0;
+        return `
         <article class="story-card">
           <div>
             <div class="story-title">${escapeHtml(story.title)}</div>
@@ -58,11 +67,21 @@ export function renderStories() {
           </div>
           <div class="story-actions">
             <div class="score">${story.score ?? "—"}/100</div>
-            <button class="secondary-btn research-story"   data-id="${story.id}">Research</button>
-            <button class="primary-btn   script-story"     data-id="${story.id}">Script</button>
-            <button class="secondary-btn production-story" data-id="${story.id}">Production</button>
+            <div class="stage-btn">
+              <button class="secondary-btn research-story" data-id="${story.id}">Research</button>
+              <span class="stage-hint">${hasAngle ? "✓ angle approved" : "not started"}</span>
+            </div>
+            <div class="stage-btn">
+              <button class="primary-btn script-story" data-id="${story.id}">Script</button>
+              <span class="stage-hint">${sceneCount ? `${sceneCount} scenes` : (hasAngle ? "ready to generate" : "needs an angle first")}</span>
+            </div>
+            <div class="stage-btn">
+              <button class="secondary-btn production-story" data-id="${story.id}">Production</button>
+              <span class="stage-hint">${sceneCount ? `${readyScenes}/${sceneCount} scenes ready` : "needs a script first"}</span>
+            </div>
           </div>
-        </article>`).join("")
+        </article>`;
+      }).join("")
     : `<div class="empty">No stories match your filters. Try refreshing feeds.</div>`;
 }
 

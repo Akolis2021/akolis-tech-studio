@@ -51,6 +51,15 @@ export function populateScriptStudio(story) {
     ? `Last generated: ${formatDate(script.generatedAt)}`
     : "No script package generated yet.";
 
+  const hasAngle = !!(story.research?.approvedAngle || story.angle);
+  const prereq = document.querySelector("#scriptPrereqNotice");
+  prereq.classList.toggle("hidden", hasAngle);
+  if (!hasAngle) prereq.textContent = "No approved editorial angle yet — head back to Research Studio and approve one before generating a script.";
+
+  const hasScenes = (script.scenes || []).length > 0;
+  document.querySelector("#continueToProductionBtn").disabled = !hasScenes;
+  document.querySelector("#continueToProductionBtn").dataset.storyId = story.id;
+
   _renderScenes(story);
   _renderAssets(story);
   _renderFlowPrompts(story);

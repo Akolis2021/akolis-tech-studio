@@ -159,6 +159,8 @@ textarea { min-height: 110px; resize: vertical; }
 }
 .score { color: var(--success); font-weight: 850; font-size: 1.1rem; }
 .story-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+.stage-btn { display: flex; flex-direction: column; align-items: center; gap: 3px; }
+.stage-hint { font-size: .68rem; color: var(--muted); white-space: nowrap; }
 
 .source-card {
   display: grid;
@@ -251,6 +253,7 @@ label { display: grid; gap: 7px; color: #d2d9e2; font-size: .9rem; }
 }
 
 .empty { color: var(--muted); padding: 20px 0; }
+.empty p { margin: 0 0 12px; }
 
 .toast {
   position: fixed;

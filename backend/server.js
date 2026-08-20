@@ -1045,4 +1045,4 @@ http.createServer(async (req, res) => {
     console.error(error);
     json(res, 500, { error: "Internal server error", detail: error.message });
   }
-}).listen(PORT, () => console.log(`Akolis Tech Studio V4 running at http://localhost:${PORT}`));
+}).listen(PORT, () => console.log(`Akolis Tech Studio API running at http://localhost:${PORT}`));

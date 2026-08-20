@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Akolis Tech Studio — V8</title>
+  <title>Akolis Tech Studio</title>
   <meta name="description" content="Personal faceless-tech content intelligence and production dashboard.">
   <link rel="stylesheet" href="styles.css">
 </head>
@@ -164,7 +164,7 @@
       <button class="close-btn" data-close="researchStudioModal" aria-label="Close">×</button>
       <div class="research-header">
         <div>
-          <span class="eyebrow">V4 · RESEARCH STUDIO</span>
+          <span class="eyebrow">RESEARCH STUDIO</span>
           <h2 id="researchTitle">Research Story</h2>
           <p id="researchSubtitle" class="modal-subtitle"></p>
         </div>
@@ -241,7 +241,10 @@
         <div class="approved-angle">
           <strong>Approved angle</strong>
           <textarea id="approvedAngle" placeholder="Your final editorial angle"></textarea>
-          <button id="saveAngleBtn" class="primary-btn">Approve & Save Angle</button>
+          <div class="modal-actions">
+            <button id="saveAngleBtn" class="primary-btn">Approve & Save Angle</button>
+            <button id="continueToScriptBtn" class="secondary-btn" disabled>Continue to Script Studio →</button>
+          </div>
         </div>
       </div>
     </div>
@@ -252,7 +255,7 @@
     <div class="modal-card script-wide">
       <button class="close-btn" data-close="scriptStudioModal" aria-label="Close">×</button>
       <div class="research-header">
-        <div><span class="eyebrow">V5 · SCRIPT STUDIO</span><h2 id="scriptTitle">Script Studio</h2><p id="scriptSubtitle" class="modal-subtitle"></p></div>
+        <div><span class="eyebrow">SCRIPT STUDIO</span><h2 id="scriptTitle">Script Studio</h2><p id="scriptSubtitle" class="modal-subtitle"></p></div>
         <div class="research-score" id="scriptDuration">—</div>
       </div>
       <div class="research-tabs">
@@ -269,8 +272,9 @@
           <div class="detail-block"><strong>Target duration (minutes)</strong><input id="scriptTargetMinutes" type="number" min="1" max="30" step="0.5" value="7"></div>
           <div class="detail-block"><strong>Voice / tone</strong><select id="scriptTone"><option value="clear-analytical">Clear & analytical</option><option value="fast-news">Fast tech-news</option><option value="conversational">Conversational</option><option value="documentary">Documentary</option></select></div>
         </div>
-        <div class="modal-actions"><button id="saveScriptSettingsBtn" class="secondary-btn">Save Settings</button><button id="generateScriptBtn" class="primary-btn">Generate Script Package</button></div>
+        <div class="modal-actions"><button id="saveScriptSettingsBtn" class="secondary-btn">Save Settings</button><button id="generateScriptBtn" class="primary-btn">Generate Script Package</button><button id="continueToProductionBtn" class="secondary-btn" disabled>Continue to Production Studio →</button></div>
         <div id="scriptGenerationNote" class="notice-box"></div>
+        <div id="scriptPrereqNotice" class="notice-box hidden"></div>
       </div>
       <div id="scriptPanelScript" class="script-panel hidden">
         <div class="script-toolbar"><span class="meta" id="scriptWordCount"></span><span class="meta" id="scriptReadTime"></span><button id="saveScriptBtn" class="secondary-btn">Save Script</button></div>
@@ -281,7 +285,7 @@
       </div>
       <div id="scriptPanelScenes" class="script-panel hidden"><div class="scene-toolbar"><button id="addSceneBtn" class="secondary-btn">+ Add Scene</button><button id="regenerateScenesBtn" class="secondary-btn">Regenerate Scene Plan</button></div><div id="sceneList" class="scene-list"></div></div>
       <div id="scriptPanelAssets" class="script-panel hidden"><div class="asset-summary" id="assetSummary"></div><div id="assetChecklist" class="asset-checklist"></div></div>
-      <div id="scriptPanelPrompts" class="script-panel hidden"><p class="meta">Prompts are prepared for manual use in Google Flow. V5 does not automate Flow.</p><div id="flowPromptList" class="flow-prompt-list"></div></div>
+      <div id="scriptPanelPrompts" class="script-panel hidden"><p class="meta">Prompts are prepared for manual use in Google Flow. This step does not automate Flow.</p><div id="flowPromptList" class="flow-prompt-list"></div></div>
     </div>
   </div>
   <div id="productionStudioModal" class="modal hidden" aria-hidden="true">
@@ -290,7 +294,7 @@
 
       <div class="research-header">
         <div>
-          <span class="eyebrow">V8 · MEDIA ENGINE</span>
+          <span class="eyebrow">PRODUCTION STUDIO</span>
           <h2 id="productionTitle">Production Studio</h2>
           <p id="productionSubtitle" class="modal-subtitle"></p>
         </div>

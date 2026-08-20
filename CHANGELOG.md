@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-08-20 — Workflow clarity pass
+
+### Changed
+
+- Research Studio, Script Studio, and Production Studio are no longer navigational dead ends: approving an angle now surfaces a "Continue to Script Studio" action, and generating a script surfaces a "Continue to Production Studio" action, each jumping directly into the next stage for the same story.
+- Production Studio's Timeline tab shows a "Go to Script Studio" action when a story has no scenes yet, instead of a plain notice.
+- Script Studio's Overview tab surfaces a notice when a story has no approved angle yet.
+- Story cards on the dashboard now show a one-line status hint under each of the Research/Script/Production buttons (e.g. "✓ angle approved", "6 scenes", "2/6 scenes ready") so progress is visible without opening a modal.
+- Removed internal version numbers (`V4`, `V5`, `V8 · MEDIA ENGINE`) from user-facing modal headers and the page title; fixed a matching stale `V4` string in the backend startup log.
+
 ## 2026-08-17 — V8 Content-Aware Media Engine
 
 ### Added

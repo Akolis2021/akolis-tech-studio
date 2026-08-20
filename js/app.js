@@ -221,6 +221,12 @@ document.querySelector("#addResearchSourceBtn").addEventListener("click", addRes
 document.querySelector("#addClaimBtn").addEventListener("click",        addClaim);
 document.querySelector("#generateAnglesBtn").addEventListener("click",  generateAngles);
 document.querySelector("#saveAngleBtn").addEventListener("click",       saveAngle);
+document.querySelector("#continueToScriptBtn").addEventListener("click", async e => {
+  const storyId = e.target.dataset.storyId;
+  if (!storyId) return;
+  closeModal("researchStudioModal");
+  await openScriptStudio(storyId);
+});
 document.querySelector("#researchSourceList").addEventListener("click", async e => {
   const btn = e.target.closest(".remove-research-source");
   if (btn) await removeResearchSource(btn.dataset.id);
@@ -240,6 +246,12 @@ document.querySelector("#generateScriptBtn").addEventListener("click",    genera
 document.querySelector("#saveScriptBtn").addEventListener("click",        saveScript);
 document.querySelector("#regenerateScenesBtn").addEventListener("click",  regenerateScenes);
 document.querySelector("#addSceneBtn").addEventListener("click",          addScene);
+document.querySelector("#continueToProductionBtn").addEventListener("click", async e => {
+  const storyId = e.target.dataset.storyId;
+  if (!storyId) return;
+  closeModal("scriptStudioModal");
+  await openProductionStudio(storyId);
+});
 document.querySelector("#sceneList").addEventListener("change", e => {
   if (e.target.classList.contains("scene-field"))
     saveSceneField(Number(e.target.dataset.i), e.target.dataset.k, e.target.value);
@@ -329,7 +341,13 @@ document.querySelector("#productionStudioModal").addEventListener("click", async
   const addOverlayBtn   = e.target.closest(".add-overlay-btn");
   const removeOverlayBtn = e.target.closest(".remove-overlay-btn");
   const removeAsset     = e.target.closest(".delete-asset-btn");
+  const goToScript      = e.target.closest(".go-to-script-btn");
 
+  if (goToScript) {
+    closeModal("productionStudioModal");
+    await openScriptStudio(goToScript.dataset.story);
+    return;
+  }
   if (attachFootage) {
     const input = document.querySelector("#sceneFootageFileInput");
     input.dataset.sceneId = attachFootage.dataset.scene;

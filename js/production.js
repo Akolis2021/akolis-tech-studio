@@ -100,7 +100,11 @@ function _renderProductionScenes(story) {
   const scenes = storyScenes(story);
 
   if (!scenes.length) {
-    list.innerHTML = `<div class="empty">No script scenes yet. Generate the script package first.</div>`;
+    list.innerHTML = `
+      <div class="empty">
+        <p>No script scenes yet. Scenes come from Script Studio — generate the script package there first.</p>
+        <button class="primary-btn go-to-script-btn" data-story="${escapeHtml(story.id)}">Go to Script Studio →</button>
+      </div>`;
     return;
   }
 

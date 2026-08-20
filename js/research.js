@@ -40,6 +40,10 @@ function populateResearchStudio(story) {
   document.querySelector("#researchCaveats").value         = brief.caveats         || "";
   document.querySelector("#approvedAngle").value           = story.research?.approvedAngle || story.angle || "";
 
+  const continueBtn = document.querySelector("#continueToScriptBtn");
+  continueBtn.disabled = !(story.research?.approvedAngle || story.angle);
+  continueBtn.dataset.storyId = story.id;
+
   _renderResearchSources(story);
   _renderClaims(story);
   _renderAngles(story);
@@ -233,6 +237,7 @@ export async function saveAngle() {
     activeResearchStory = updated;
     cacheStory(updated);
     renderAll();
+    document.querySelector("#continueToScriptBtn").disabled = false;
     showToast("Editorial angle approved.");
   } catch (error) { showToast(error.message); }
 }
