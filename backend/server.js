@@ -8,6 +8,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import Parser from "rss-parser";
 import Busboy from "busboy";
+import { EdgeTTS } from "@travisvn/edge-tts";
 
 const execFileAsync = promisify(execFile);
 
@@ -283,32 +284,26 @@ async function registerProductionAsset(story, storyId, {
   return asset;
 }
 
-// Synthesizes narration audio for a single scene via the Google Cloud
-// Text-to-Speech REST API. Requires GOOGLE_TTS_API_KEY; voice defaults to
-// GOOGLE_TTS_VOICE or "en-US-Neural2-D". Scripts are well under the 5,000
-// byte per-request limit, so no chunking is needed at this app's scale.
+// Synthesizes narration audio for a single scene using Microsoft Edge's
+// online neural TTS service (via the unofficial @travisvn/edge-tts client).
+// No API key or billing account required. This talks to an internal,
+// unofficial Microsoft endpoint rather than a published/supported API —
+// it's free and reliable in practice, but could break without notice if
+// Microsoft changes that endpoint. Voice defaults to EDGE_TTS_VOICE or
+// "en-US-EmmaMultilingualNeural"; see the full voice list via the
+// package's listVoices() helper if you want to pick a different one.
 async function synthesizeVoiceover(text, destPath) {
-  const apiKey = process.env.GOOGLE_TTS_API_KEY;
-  if (!apiKey) throw new Error("GOOGLE_TTS_API_KEY is not configured on the server.");
-  const voiceName    = process.env.GOOGLE_TTS_VOICE || "en-US-Neural2-D";
-  const languageCode = voiceName.split("-").slice(0, 2).join("-") || "en-US";
-
-  const response = await fetch(`https://texttospeech.googleapis.com/v1/text:synthesize?key=${apiKey}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      input:       { text },
-      voice:       { languageCode, name: voiceName },
-      audioConfig: { audioEncoding: "MP3" }
-    })
-  });
-  if (!response.ok) {
-    const errText = await response.text().catch(() => "");
-    throw new Error(`Google TTS request failed (${response.status}): ${errText.slice(0, 200)}`);
+  const voice = process.env.EDGE_TTS_VOICE || "en-US-EmmaMultilingualNeural";
+  const tts = new EdgeTTS(text, voice);
+  let result;
+  try {
+    result = await tts.synthesize();
+  } catch (error) {
+    throw new Error(`Edge TTS request failed: ${error.message}`);
   }
-  const data = await response.json();
-  if (!data.audioContent) throw new Error("Google TTS returned no audio content.");
-  await fs.writeFile(destPath, Buffer.from(data.audioContent, "base64"));
+  const buffer = Buffer.from(await result.audio.arrayBuffer());
+  if (!buffer.length) throw new Error("Edge TTS returned no audio content.");
+  await fs.writeFile(destPath, buffer);
 }
 
 // Fetches a stock b-roll clip matching a text query via the Pexels Videos

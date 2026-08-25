@@ -38,16 +38,25 @@ per-scene stock footage — then renders, all from one click in Production
 Studio's Timeline tab. It never overwrites footage/voiceover you've already
 attached yourself.
 
-1. Copy `.env.example` to `.env`.
-2. Fill in `GOOGLE_TTS_API_KEY` (Google Cloud Text-to-Speech — has a
-   recurring monthly free tier, see `.env.example` for details) and
-   `PEXELS_API_KEY` (free, no card required).
-3. Start the server with `node --env-file=.env server.js` instead of
-   `npm start` so the keys are loaded.
+Voiceover needs no setup at all — it runs on Microsoft Edge's TTS service
+(no API key, no billing account). Stock footage needs one free key:
 
-Without either key set, Autopilot still runs — it'll write the script and
-attempt the render, but scenes missing voiceover/footage will show up as
-warnings on the job instead of silently failing.
+1. Copy `.env.example` to `.env`.
+2. Fill in `PEXELS_API_KEY` (free, no card required — https://www.pexels.com/api/).
+3. Start the server with `node --env-file=.env server.js` instead of
+   `npm start` so the key is loaded.
+
+Without `PEXELS_API_KEY` set, Autopilot still runs — it'll write the script,
+generate voiceover, and attempt the render, but scenes with no footage of
+their own will show up as warnings on the job instead of silently failing.
+
+Note on voiceover: it goes through the `@travisvn/edge-tts` package, which
+talks to an unofficial, unpublished Microsoft endpoint (the same one behind
+Edge's built-in "Read Aloud"). It's free and has been reliable in practice,
+but — unlike a published API — Microsoft could change that endpoint without
+notice. If narration generation ever starts failing across the board, that's
+the first thing to check; swapping in a different TTS provider only means
+changing the body of `synthesizeVoiceover()` in `server.js`.
 
 ## Media endpoints
 

@@ -8,6 +8,7 @@
     "dev": "node --watch server.js"
   },
   "dependencies": {
+    "@travisvn/edge-tts": "^1.0.2",
     "busboy": "^1.6.0",
     "rss-parser": "^3.13.0"
   }

@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-08-21 — Swap voiceover provider to Edge TTS
+
+### Changed
+
+- `synthesizeVoiceover()` (used by Autopilot and the per-scene voiceover-auto endpoint) now runs on Microsoft Edge's TTS service via `@travisvn/edge-tts` instead of Google Cloud Text-to-Speech. No API key or billing account required — unblocks Autopilot immediately for anyone who hasn't set up Google Cloud billing.
+- New env var `EDGE_TTS_VOICE` (optional, defaults to `en-US-EmmaMultilingualNeural`) replaces `GOOGLE_TTS_API_KEY` / `GOOGLE_TTS_VOICE`.
+- `backend/.env.example` and `backend/README.md` updated accordingly.
+
 ## 2026-08-20 — Autopilot
 
 ### Added

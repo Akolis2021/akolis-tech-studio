@@ -1,0 +1,663 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index eea1ab1..e30b8d4 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -1,5 +1,13 @@
+ # Changelog
+ 
++## 2026-08-21 — Swap voiceover provider to Edge TTS
++
++### Changed
++
++- `synthesizeVoiceover()` (used by Autopilot and the per-scene voiceover-auto endpoint) now runs on Microsoft Edge's TTS service via `@travisvn/edge-tts` instead of Google Cloud Text-to-Speech. No API key or billing account required — unblocks Autopilot immediately for anyone who hasn't set up Google Cloud billing.
++- New env var `EDGE_TTS_VOICE` (optional, defaults to `en-US-EmmaMultilingualNeural`) replaces `GOOGLE_TTS_API_KEY` / `GOOGLE_TTS_VOICE`.
++- `backend/.env.example` and `backend/README.md` updated accordingly.
++
+ ## 2026-08-20 — Autopilot
+ 
+ ### Added
+diff --git a/backend/.env.example b/backend/.env.example
+index a2397ee..b3aa12d 100644
+--- a/backend/.env.example
++++ b/backend/.env.example
+@@ -1,16 +1,13 @@
+-# Copy this file to .env and fill in your own keys. Never commit .env.
++# Copy this file to .env and fill in your own values. Never commit .env.
+ # Node loads it automatically if you start the server with:
+ #   node --env-file=.env server.js
+ 
+-# Google Cloud Text-to-Speech — used by Autopilot to generate scene voiceover.
+-# Free tier: 4M chars/month (Standard), 1M chars/month (WaveNet/Neural2/Chirp3).
+-# Get a key: https://console.cloud.google.com/apis/credentials
+-# (enable the "Cloud Text-to-Speech API" on your project first)
+-GOOGLE_TTS_API_KEY=
+-
+-# Optional — defaults to en-US-Neural2-D if not set.
+-# Browse voices: https://cloud.google.com/text-to-speech/docs/voices
+-GOOGLE_TTS_VOICE=en-US-Neural2-D
++# Voiceover — runs on Microsoft Edge's TTS service via the @travisvn/edge-tts
++# package. No API key, no billing account, nothing to sign up for.
++# Optional — defaults to en-US-EmmaMultilingualNeural if not set.
++# See other voice options by calling listVoices() from that package, or
++# just try a different name from https://github.com/travisvn/edge-tts
++EDGE_TTS_VOICE=en-US-EmmaMultilingualNeural
+ 
+ # Pexels — used by Autopilot to fetch stock b-roll for scenes with no
+ # footage of your own attached. Free, no card required.
+diff --git a/backend/README.md b/backend/README.md
+index 5204cb0..d9f7426 100644
+--- a/backend/README.md
++++ b/backend/README.md
+@@ -38,16 +38,25 @@ per-scene stock footage — then renders, all from one click in Production
+ Studio's Timeline tab. It never overwrites footage/voiceover you've already
+ attached yourself.
+ 
++Voiceover needs no setup at all — it runs on Microsoft Edge's TTS service
++(no API key, no billing account). Stock footage needs one free key:
++
+ 1. Copy `.env.example` to `.env`.
+-2. Fill in `GOOGLE_TTS_API_KEY` (Google Cloud Text-to-Speech — has a
+-   recurring monthly free tier, see `.env.example` for details) and
+-   `PEXELS_API_KEY` (free, no card required).
++2. Fill in `PEXELS_API_KEY` (free, no card required — https://www.pexels.com/api/).
+ 3. Start the server with `node --env-file=.env server.js` instead of
+-   `npm start` so the keys are loaded.
+-
+-Without either key set, Autopilot still runs — it'll write the script and
+-attempt the render, but scenes missing voiceover/footage will show up as
+-warnings on the job instead of silently failing.
++   `npm start` so the key is loaded.
++
++Without `PEXELS_API_KEY` set, Autopilot still runs — it'll write the script,
++generate voiceover, and attempt the render, but scenes with no footage of
++their own will show up as warnings on the job instead of silently failing.
++
++Note on voiceover: it goes through the `@travisvn/edge-tts` package, which
++talks to an unofficial, unpublished Microsoft endpoint (the same one behind
++Edge's built-in "Read Aloud"). It's free and has been reliable in practice,
++but — unlike a published API — Microsoft could change that endpoint without
++notice. If narration generation ever starts failing across the board, that's
++the first thing to check; swapping in a different TTS provider only means
++changing the body of `synthesizeVoiceover()` in `server.js`.
+ 
+ ## Media endpoints
+ 
+diff --git a/backend/package-lock.json b/backend/package-lock.json
+index 4595f04..635548e 100644
+--- a/backend/package-lock.json
++++ b/backend/package-lock.json
+@@ -8,10 +8,76 @@
+       "name": "akolis-tech-studio-api",
+       "version": "0.7.0",
+       "dependencies": {
++        "@travisvn/edge-tts": "^1.0.2",
+         "busboy": "^1.6.0",
+         "rss-parser": "^3.13.0"
+       }
+     },
++    "node_modules/@travisvn/edge-tts": {
++      "version": "1.0.2",
++      "resolved": "https://registry.npmjs.org/@travisvn/edge-tts/-/edge-tts-1.0.2.tgz",
++      "integrity": "sha512-afwl0QYFF0vdxXCwK2j5h+m6py1wJ3mp3Ao8FzD6EYTYAbvhf3WYN9Unr4Tbnp25YsvyiCrMMnZXNx2peacwLQ==",
++      "license": "AGPL-3.0",
++      "dependencies": {
++        "axios": "^1.4.0",
++        "https-proxy-agent": "^7.0.6",
++        "uuid": "^11.1.0",
++        "ws": "^8.13.0",
++        "xml-escape": "^1.1.0"
++      }
++    },
++    "node_modules/agent-base": {
++      "version": "7.1.4",
++      "resolved": "https://registry.npmjs.org/agent-base/-/agent-base-7.1.4.tgz",
++      "integrity": "sha512-MnA+YT8fwfJPgBx3m60MNqakm30XOkyIoH1y6huTQvC0PwZG7ki8NacLBcrPbNoo8vEZy7Jpuk7+jMO+CUovTQ==",
++      "license": "MIT",
++      "engines": {
++        "node": ">= 14"
++      }
++    },
++    "node_modules/asynckit": {
++      "version": "0.4.0",
++      "resolved": "https://registry.npmjs.org/asynckit/-/asynckit-0.4.0.tgz",
++      "integrity": "sha512-Oei9OH4tRh0YqU3GxhX79dM/mwVgvbZJaSNaRk+bshkj0S5cfHcgYakreBjrHwatXKbz+IoIdYLxrKim2MjW0Q==",
++      "license": "MIT"
++    },
++    "node_modules/axios": {
++      "version": "1.19.0",
++      "resolved": "https://registry.npmjs.org/axios/-/axios-1.19.0.tgz",
++      "integrity": "sha512-ht/iuYZXEjFxLH/Hkezgd7m6JKlHHXEUSneaDz8uZe1Gj5QZtCnpyDsckvAiEnT89OEbCLmnte4R4sn7P0EKFw==",
++      "license": "MIT",
++      "dependencies": {
++        "follow-redirects": "^1.16.0",
++        "form-data": "^4.0.6",
++        "https-proxy-agent": "^5.0.1",
++        "proxy-from-env": "^2.1.0"
++      }
++    },
++    "node_modules/axios/node_modules/agent-base": {
++      "version": "6.0.2",
++      "resolved": "https://registry.npmjs.org/agent-base/-/agent-base-6.0.2.tgz",
++      "integrity": "sha512-RZNwNclF7+MS/8bDg70amg32dyeZGZxiDuQmZxKLAlQjr3jGyLx+4Kkk58UO7D2QdgFIQCovuSuZESne6RG6XQ==",
++      "license": "MIT",
++      "dependencies": {
++        "debug": "4"
++      },
++      "engines": {
++        "node": ">= 6.0.0"
++      }
++    },
++    "node_modules/axios/node_modules/https-proxy-agent": {
++      "version": "5.0.1",
++      "resolved": "https://registry.npmjs.org/https-proxy-agent/-/https-proxy-agent-5.0.1.tgz",
++      "integrity": "sha512-dFcAjpTQFgoLMzC2VwU+C/CbS7uRL0lWmxDITmqm7C+7F0Odmj6s9l6alZc6AELXhrnggM2CeWSXHGOdX2YtwA==",
++      "license": "MIT",
++      "dependencies": {
++        "agent-base": "6",
++        "debug": "4"
++      },
++      "engines": {
++        "node": ">= 6"
++      }
++    },
+     "node_modules/busboy": {
+       "version": "1.6.0",
+       "resolved": "https://registry.npmjs.org/busboy/-/busboy-1.6.0.tgz",
+@@ -23,6 +89,71 @@
+         "node": ">=10.16.0"
+       }
+     },
++    "node_modules/call-bind-apply-helpers": {
++      "version": "1.0.2",
++      "resolved": "https://registry.npmjs.org/call-bind-apply-helpers/-/call-bind-apply-helpers-1.0.2.tgz",
++      "integrity": "sha512-Sp1ablJ0ivDkSzjcaJdxEunN5/XvksFJ2sMBFfq6x0ryhQV/2b/KwFe21cMpmHtPOSij8K99/wSfoEuTObmuMQ==",
++      "license": "MIT",
++      "dependencies": {
++        "es-errors": "^1.3.0",
++        "function-bind": "^1.1.2"
++      },
++      "engines": {
++        "node": ">= 0.4"
++      }
++    },
++    "node_modules/combined-stream": {
++      "version": "1.0.8",
++      "resolved": "https://registry.npmjs.org/combined-stream/-/combined-stream-1.0.8.tgz",
++      "integrity": "sha512-FQN4MRfuJeHf7cBbBMJFXhKSDq+2kAArBlmRBvcvFE5BB1HZKXtSFASDhdlz9zOYwxh8lDdnvmMOe/+5cdoEdg==",
++      "license": "MIT",
++      "dependencies": {
++        "delayed-stream": "~1.0.0"
++      },
++      "engines": {
++        "node": ">= 0.8"
++      }
++    },
++    "node_modules/debug": {
++      "version": "4.4.3",
++      "resolved": "https://registry.npmjs.org/debug/-/debug-4.4.3.tgz",
++      "integrity": "sha512-RGwwWnwQvkVfavKVt22FGLw+xYSdzARwm0ru6DhTVA3umU5hZc28V3kO4stgYryrTlLpuvgI9GiijltAjNbcqA==",
++      "license": "MIT",
++      "dependencies": {
++        "ms": "^2.1.3"
++      },
++      "engines": {
++        "node": ">=6.0"
++      },
++      "peerDependenciesMeta": {
++        "supports-color": {
++          "optional": true
++        }
++      }
++    },
++    "node_modules/delayed-stream": {
++      "version": "1.0.0",
++      "resolved": "https://registry.npmjs.org/delayed-stream/-/delayed-stream-1.0.0.tgz",
++      "integrity": "sha512-ZySD7Nf91aLB0RxL4KGrKHBXl7Eds1DAmEdcoVawXnLD7SDhpNgtuII2aAkg7a7QS41jxPSZ17p4VdGnMHk3MQ==",
++      "license": "MIT",
++      "engines": {
++        "node": ">=0.4.0"
++      }
++    },
++    "node_modules/dunder-proto": {
++      "version": "1.0.1",
++      "resolved": "https://registry.npmjs.org/dunder-proto/-/dunder-proto-1.0.1.tgz",
++      "integrity": "sha512-KIN/nDJBQRcXw0MLVhZE9iQHmG68qAVIBg9CqmUYjmQIhgij9U5MFvrqkUL5FbtyyzZuOeOt0zdeRe4UY7ct+A==",
++      "license": "MIT",
++      "dependencies": {
++        "call-bind-apply-helpers": "^1.0.1",
++        "es-errors": "^1.3.0",
++        "gopd": "^1.2.0"
++      },
++      "engines": {
++        "node": ">= 0.4"
++      }
++    },
+     "node_modules/entities": {
+       "version": "2.2.0",
+       "resolved": "https://registry.npmjs.org/entities/-/entities-2.2.0.tgz",
+@@ -32,6 +163,242 @@
+         "url": "https://github.com/fb55/entities?sponsor=1"
+       }
+     },
++    "node_modules/es-define-property": {
++      "version": "1.0.1",
++      "resolved": "https://registry.npmjs.org/es-define-property/-/es-define-property-1.0.1.tgz",
++      "integrity": "sha512-e3nRfgfUZ4rNGL232gUgX06QNyyez04KdjFrF+LTRoOXmrOgFKDg4BCdsjW8EnT69eqdYGmRpJwiPVYNrCaW3g==",
++      "license": "MIT",
++      "engines": {
++        "node": ">= 0.4"
++      }
++    },
++    "node_modules/es-errors": {
++      "version": "1.3.0",
++      "resolved": "https://registry.npmjs.org/es-errors/-/es-errors-1.3.0.tgz",
++      "integrity": "sha512-Zf5H2Kxt2xjTvbJvP2ZWLEICxA6j+hAmMzIlypy4xcBg1vKVnx89Wy0GbS+kf5cwCVFFzdCFh2XSCFNULS6csw==",
++      "license": "MIT",
++      "engines": {
++        "node": ">= 0.4"
++      }
++    },
++    "node_modules/es-object-atoms": {
++      "version": "1.1.2",
++      "resolved": "https://registry.npmjs.org/es-object-atoms/-/es-object-atoms-1.1.2.tgz",
++      "integrity": "sha512-HWcBoN6NileqtSydK2FqHbS/LoDd2pqrnQHLyJzBj4kOp/ky2MWMN694xOfkK8/SnUsW2DH7EfyVlydKCsm1Zw==",
++      "license": "MIT",
++      "dependencies": {
++        "es-errors": "^1.3.0"
++      },
++      "engines": {
++        "node": ">= 0.4"
++      }
++    },
++    "node_modules/es-set-tostringtag": {
++      "version": "2.1.0",
++      "resolved": "https://registry.npmjs.org/es-set-tostringtag/-/es-set-tostringtag-2.1.0.tgz",
++      "integrity": "sha512-j6vWzfrGVfyXxge+O0x5sh6cvxAog0a/4Rdd2K36zCMV5eJ+/+tOAngRO8cODMNWbVRdVlmGZQL2YS3yR8bIUA==",
++      "license": "MIT",
++      "dependencies": {
++        "es-errors": "^1.3.0",
++        "get-intrinsic": "^1.2.6",
++        "has-tostringtag": "^1.0.2",
++        "hasown": "^2.0.2"
++      },
++      "engines": {
++        "node": ">= 0.4"
++      }
++    },
++    "node_modules/follow-redirects": {
++      "version": "1.16.0",
++      "resolved": "https://registry.npmjs.org/follow-redirects/-/follow-redirects-1.16.0.tgz",
++      "integrity": "sha512-y5rN/uOsadFT/JfYwhxRS5R7Qce+g3zG97+JrtFZlC9klX/W5hD7iiLzScI4nZqUS7DNUdhPgw4xI8W2LuXlUw==",
++      "funding": [
++        {
++          "type": "individual",
++          "url": "https://github.com/sponsors/RubenVerborgh"
++        }
++      ],
++      "license": "MIT",
++      "engines": {
++        "node": ">=4.0"
++      },
++      "peerDependenciesMeta": {
++        "debug": {
++          "optional": true
++        }
++      }
++    },
++    "node_modules/form-data": {
++      "version": "4.0.6",
++      "resolved": "https://registry.npmjs.org/form-data/-/form-data-4.0.6.tgz",
++      "integrity": "sha512-vKatAh4SlVfgbv+YtmhiRjhEMJsYpsG1Y2rMQtR+SVSbytsSD1YGzDIcrAJmdFec88u/+VoGmxnl+80gL1tRCQ==",
++      "license": "MIT",
++      "dependencies": {
++        "asynckit": "^0.4.0",
++        "combined-stream": "^1.0.8",
++        "es-set-tostringtag": "^2.1.0",
++        "hasown": "^2.0.4",
++        "mime-types": "^2.1.35"
++      },
++      "engines": {
++        "node": ">= 6"
++      }
++    },
++    "node_modules/function-bind": {
++      "version": "1.1.2",
++      "resolved": "https://registry.npmjs.org/function-bind/-/function-bind-1.1.2.tgz",
++      "integrity": "sha512-7XHNxH7qX9xG5mIwxkhumTox/MIRNcOgDrxWsMt2pAr23WHp6MrRlN7FBSFpCpr+oVO0F744iUgR82nJMfG2SA==",
++      "license": "MIT",
++      "funding": {
++        "url": "https://github.com/sponsors/ljharb"
++      }
++    },
++    "node_modules/get-intrinsic": {
++      "version": "1.3.0",
++      "resolved": "https://registry.npmjs.org/get-intrinsic/-/get-intrinsic-1.3.0.tgz",
++      "integrity": "sha512-9fSjSaos/fRIVIp+xSJlE6lfwhES7LNtKaCBIamHsjr2na1BiABJPo0mOjjz8GJDURarmCPGqaiVg5mfjb98CQ==",
++      "license": "MIT",
++      "dependencies": {
++        "call-bind-apply-helpers": "^1.0.2",
++        "es-define-property": "^1.0.1",
++        "es-errors": "^1.3.0",
++        "es-object-atoms": "^1.1.1",
++        "function-bind": "^1.1.2",
++        "get-proto": "^1.0.1",
++        "gopd": "^1.2.0",
++        "has-symbols": "^1.1.0",
++        "hasown": "^2.0.2",
++        "math-intrinsics": "^1.1.0"
++      },
++      "engines": {
++        "node": ">= 0.4"
++      },
++      "funding": {
++        "url": "https://github.com/sponsors/ljharb"
++      }
++    },
++    "node_modules/get-proto": {
++      "version": "1.0.1",
++      "resolved": "https://registry.npmjs.org/get-proto/-/get-proto-1.0.1.tgz",
++      "integrity": "sha512-sTSfBjoXBp89JvIKIefqw7U2CCebsc74kiY6awiGogKtoSGbgjYE/G/+l9sF3MWFPNc9IcoOC4ODfKHfxFmp0g==",
++      "license": "MIT",
++      "dependencies": {
++        "dunder-proto": "^1.0.1",
++        "es-object-atoms": "^1.0.0"
++      },
++      "engines": {
++        "node": ">= 0.4"
++      }
++    },
++    "node_modules/gopd": {
++      "version": "1.2.0",
++      "resolved": "https://registry.npmjs.org/gopd/-/gopd-1.2.0.tgz",
++      "integrity": "sha512-ZUKRh6/kUFoAiTAtTYPZJ3hw9wNxx+BIBOijnlG9PnrJsCcSjs1wyyD6vJpaYtgnzDrKYRSqf3OO6Rfa93xsRg==",
++      "license": "MIT",
++      "engines": {
++        "node": ">= 0.4"
++      },
++      "funding": {
++        "url": "https://github.com/sponsors/ljharb"
++      }
++    },
++    "node_modules/has-symbols": {
++      "version": "1.1.0",
++      "resolved": "https://registry.npmjs.org/has-symbols/-/has-symbols-1.1.0.tgz",
++      "integrity": "sha512-1cDNdwJ2Jaohmb3sg4OmKaMBwuC48sYni5HUw2DvsC8LjGTLK9h+eb1X6RyuOHe4hT0ULCW68iomhjUoKUqlPQ==",
++      "license": "MIT",
++      "engines": {
++        "node": ">= 0.4"
++      },
++      "funding": {
++        "url": "https://github.com/sponsors/ljharb"
++      }
++    },
++    "node_modules/has-tostringtag": {
++      "version": "1.0.2",
++      "resolved": "https://registry.npmjs.org/has-tostringtag/-/has-tostringtag-1.0.2.tgz",
++      "integrity": "sha512-NqADB8VjPFLM2V0VvHUewwwsw0ZWBaIdgo+ieHtK3hasLz4qeCRjYcqfB6AQrBggRKppKF8L52/VqdVsO47Dlw==",
++      "license": "MIT",
++      "dependencies": {
++        "has-symbols": "^1.0.3"
++      },
++      "engines": {
++        "node": ">= 0.4"
++      },
++      "funding": {
++        "url": "https://github.com/sponsors/ljharb"
++      }
++    },
++    "node_modules/hasown": {
++      "version": "2.0.4",
++      "resolved": "https://registry.npmjs.org/hasown/-/hasown-2.0.4.tgz",
++      "integrity": "sha512-T2UbfbBEF32wiepXIsMlTW9+dDYC6wMh/t/vYA4tuOMKqWz/n3vr1NFSxQiyP+zk2mXsoMA/i/7qV6LKut1t1A==",
++      "license": "MIT",
++      "dependencies": {
++        "function-bind": "^1.1.2"
++      },
++      "engines": {
++        "node": ">= 0.4"
++      }
++    },
++    "node_modules/https-proxy-agent": {
++      "version": "7.0.6",
++      "resolved": "https://registry.npmjs.org/https-proxy-agent/-/https-proxy-agent-7.0.6.tgz",
++      "integrity": "sha512-vK9P5/iUfdl95AI+JVyUuIcVtd4ofvtrOr3HNtM2yxC9bnMbEdp3x01OhQNnjb8IJYi38VlTE3mBXwcfvywuSw==",
++      "license": "MIT",
++      "dependencies": {
++        "agent-base": "^7.1.2",
++        "debug": "4"
++      },
++      "engines": {
++        "node": ">= 14"
++      }
++    },
++    "node_modules/math-intrinsics": {
++      "version": "1.1.0",
++      "resolved": "https://registry.npmjs.org/math-intrinsics/-/math-intrinsics-1.1.0.tgz",
++      "integrity": "sha512-/IXtbwEk5HTPyEwyKX6hGkYXxM9nbj64B+ilVJnC/R6B0pH5G4V3b0pVbL7DBj4tkhBAppbQUlf6F6Xl9LHu1g==",
++      "license": "MIT",
++      "engines": {
++        "node": ">= 0.4"
++      }
++    },
++    "node_modules/mime-db": {
++      "version": "1.52.0",
++      "resolved": "https://registry.npmjs.org/mime-db/-/mime-db-1.52.0.tgz",
++      "integrity": "sha512-sPU4uV7dYlvtWJxwwxHD0PuihVNiE7TyAbQ5SWxDCB9mUYvOgroQOwYQQOKPJ8CIbE+1ETVlOoK1UC2nU3gYvg==",
++      "license": "MIT",
++      "engines": {
++        "node": ">= 0.6"
++      }
++    },
++    "node_modules/mime-types": {
++      "version": "2.1.35",
++      "resolved": "https://registry.npmjs.org/mime-types/-/mime-types-2.1.35.tgz",
++      "integrity": "sha512-ZDY+bPm5zTTF+YpCrAU9nK0UgICYPT0QtT1NZWFv4s++TNkcgVaT0g6+4R2uI4MjQjzysHB1zxuWL50hzaeXiw==",
++      "license": "MIT",
++      "dependencies": {
++        "mime-db": "1.52.0"
++      },
++      "engines": {
++        "node": ">= 0.6"
++      }
++    },
++    "node_modules/ms": {
++      "version": "2.1.3",
++      "resolved": "https://registry.npmjs.org/ms/-/ms-2.1.3.tgz",
++      "integrity": "sha512-6FlzubTLZG3J2a/NVCAleEhjzq5oxgHyaCU9yYXvcLsvoVaHJq/s5xXI6/XXP6tz7R9xAOtHnSO/tXtF3WRTlA==",
++      "license": "MIT"
++    },
++    "node_modules/proxy-from-env": {
++      "version": "2.1.0",
++      "resolved": "https://registry.npmjs.org/proxy-from-env/-/proxy-from-env-2.1.0.tgz",
++      "integrity": "sha512-cJ+oHTW1VAEa8cJslgmUZrc+sjRKgAKl3Zyse6+PV38hZe/V6Z14TbCuXcan9F9ghlz4QrFr2c92TNF82UkYHA==",
++      "license": "MIT",
++      "engines": {
++        "node": ">=10"
++      }
++    },
+     "node_modules/rss-parser": {
+       "version": "3.13.0",
+       "resolved": "https://registry.npmjs.org/rss-parser/-/rss-parser-3.13.0.tgz",
+@@ -59,6 +426,46 @@
+         "node": ">=10.0.0"
+       }
+     },
++    "node_modules/uuid": {
++      "version": "11.1.1",
++      "resolved": "https://registry.npmjs.org/uuid/-/uuid-11.1.1.tgz",
++      "integrity": "sha512-vIYxrBCC/N/K+Js3qSN88go7kIfNPssr/hHCesKCQNAjmgvYS2oqr69kIufEG+O4+PfezOH4EbIeHCfFov8ZgQ==",
++      "funding": [
++        "https://github.com/sponsors/broofa",
++        "https://github.com/sponsors/ctavan"
++      ],
++      "license": "MIT",
++      "bin": {
++        "uuid": "dist/esm/bin/uuid"
++      }
++    },
++    "node_modules/ws": {
++      "version": "8.21.3",
++      "resolved": "https://registry.npmjs.org/ws/-/ws-8.21.3.tgz",
++      "integrity": "sha512-201TZ/kPWxoPr/OKWjquZR1SWKXcvxdH+e1xrx89b3YbmzLMFCLfnaG1HFIgWzJOEWZ7MvpK++odZufgYR50Rw==",
++      "license": "MIT",
++      "engines": {
++        "node": ">=10.0.0"
++      },
++      "peerDependencies": {
++        "bufferutil": "^4.0.1",
++        "utf-8-validate": ">=5.0.2"
++      },
++      "peerDependenciesMeta": {
++        "bufferutil": {
++          "optional": true
++        },
++        "utf-8-validate": {
++          "optional": true
++        }
++      }
++    },
++    "node_modules/xml-escape": {
++      "version": "1.1.0",
++      "resolved": "https://registry.npmjs.org/xml-escape/-/xml-escape-1.1.0.tgz",
++      "integrity": "sha512-B/T4sDK8Z6aUh/qNr7mjKAwwncIljFuUP+DO/D5hloYFj+90O88z8Wf7oSucZTHxBAsC1/CTP4rtx/x1Uf72Mg==",
++      "license": "MIT License"
++    },
+     "node_modules/xml2js": {
+       "version": "0.5.0",
+       "resolved": "https://registry.npmjs.org/xml2js/-/xml2js-0.5.0.tgz",
+diff --git a/backend/package.json b/backend/package.json
+index 66acf06..4c67499 100644
+--- a/backend/package.json
++++ b/backend/package.json
+@@ -8,6 +8,7 @@
+     "dev": "node --watch server.js"
+   },
+   "dependencies": {
++    "@travisvn/edge-tts": "^1.0.2",
+     "busboy": "^1.6.0",
+     "rss-parser": "^3.13.0"
+   }
+diff --git a/backend/server.js b/backend/server.js
+index c7c245e..34ec899 100644
+--- a/backend/server.js
++++ b/backend/server.js
+@@ -8,6 +8,7 @@ import { execFile } from "node:child_process";
+ import { promisify } from "node:util";
+ import Parser from "rss-parser";
+ import Busboy from "busboy";
++import { EdgeTTS } from "@travisvn/edge-tts";
+ 
+ const execFileAsync = promisify(execFile);
+ 
+@@ -283,32 +284,26 @@ async function registerProductionAsset(story, storyId, {
+   return asset;
+ }
+ 
+-// Synthesizes narration audio for a single scene via the Google Cloud
+-// Text-to-Speech REST API. Requires GOOGLE_TTS_API_KEY; voice defaults to
+-// GOOGLE_TTS_VOICE or "en-US-Neural2-D". Scripts are well under the 5,000
+-// byte per-request limit, so no chunking is needed at this app's scale.
++// Synthesizes narration audio for a single scene using Microsoft Edge's
++// online neural TTS service (via the unofficial @travisvn/edge-tts client).
++// No API key or billing account required. This talks to an internal,
++// unofficial Microsoft endpoint rather than a published/supported API —
++// it's free and reliable in practice, but could break without notice if
++// Microsoft changes that endpoint. Voice defaults to EDGE_TTS_VOICE or
++// "en-US-EmmaMultilingualNeural"; see the full voice list via the
++// package's listVoices() helper if you want to pick a different one.
+ async function synthesizeVoiceover(text, destPath) {
+-  const apiKey = process.env.GOOGLE_TTS_API_KEY;
+-  if (!apiKey) throw new Error("GOOGLE_TTS_API_KEY is not configured on the server.");
+-  const voiceName    = process.env.GOOGLE_TTS_VOICE || "en-US-Neural2-D";
+-  const languageCode = voiceName.split("-").slice(0, 2).join("-") || "en-US";
+-
+-  const response = await fetch(`https://texttospeech.googleapis.com/v1/text:synthesize?key=${apiKey}`, {
+-    method: "POST",
+-    headers: { "Content-Type": "application/json" },
+-    body: JSON.stringify({
+-      input:       { text },
+-      voice:       { languageCode, name: voiceName },
+-      audioConfig: { audioEncoding: "MP3" }
+-    })
+-  });
+-  if (!response.ok) {
+-    const errText = await response.text().catch(() => "");
+-    throw new Error(`Google TTS request failed (${response.status}): ${errText.slice(0, 200)}`);
++  const voice = process.env.EDGE_TTS_VOICE || "en-US-EmmaMultilingualNeural";
++  const tts = new EdgeTTS(text, voice);
++  let result;
++  try {
++    result = await tts.synthesize();
++  } catch (error) {
++    throw new Error(`Edge TTS request failed: ${error.message}`);
+   }
+-  const data = await response.json();
+-  if (!data.audioContent) throw new Error("Google TTS returned no audio content.");
+-  await fs.writeFile(destPath, Buffer.from(data.audioContent, "base64"));
++  const buffer = Buffer.from(await result.audio.arrayBuffer());
++  if (!buffer.length) throw new Error("Edge TTS returned no audio content.");
++  await fs.writeFile(destPath, buffer);
+ }
+ 
+ // Fetches a stock b-roll clip matching a text query via the Pexels Videos
+diff --git a/logs/2026-08-21-edge-tts-swap.md b/logs/2026-08-21-edge-tts-swap.md
+new file mode 100644
+index 0000000..804bdb6
+--- /dev/null
++++ b/logs/2026-08-21-edge-tts-swap.md
+@@ -0,0 +1,55 @@
++# 2026-08-21 — Swap voiceover provider to Edge TTS
++
++## Objective
++User got stuck setting up Google Cloud billing (required to activate Cloud
++TTS even within its free tier) and needed an unblocked path to keep testing
++Autopilot without waiting on that.
++
++## Files changed
++- `backend/server.js`
++- `backend/package.json`
++- `backend/.env.example`
++- `backend/README.md`
++- `CHANGELOG.md`
++
++## What was implemented
++Replaced the Google Cloud TTS REST call inside `synthesizeVoiceover()` with
++the `@travisvn/edge-tts` npm package, which talks to Microsoft Edge's online
++TTS service. No API key, no billing account, nothing to sign up for. Same
++function signature, same call sites (Autopilot and the per-scene
++`/voiceover/auto` endpoint) — nothing else in the pipeline changed.
++
++`EDGE_TTS_VOICE` env var replaces `GOOGLE_TTS_API_KEY`/`GOOGLE_TTS_VOICE`,
++defaulting to `en-US-EmmaMultilingualNeural`.
++
++## What was intentionally not implemented
++- Did not build a pluggable multi-provider abstraction (e.g. `TTS_PROVIDER=
++  google|edge`) to keep both options live side by side. Given the user
++  explicitly asked to avoid complexity, this is a straight swap. Google TTS
++  can be reinstated later by restoring the previous `synthesizeVoiceover()`
++  body (see CHANGELOG.md 2026-08-20 entry / git history) if its higher
++  reliability/SLA becomes worth the billing setup.
++
++## Bugs/issues found (not yet fixed)
++- None new. Carried-over items unchanged (see 2026-08-20 logs).
++
++## Decisions made
++- Chose `@travisvn/edge-tts` over alternatives (Azure free tier, ElevenLabs
++  free tier, self-hosted Piper/Coqui) because it requires zero account setup
++  of any kind — directly matches "unblock me right now" — at the cost of
++  relying on an unofficial, unpublished Microsoft endpoint rather than a
++  supported API. Documented that trade-off in `backend/README.md` so it's
++  not a surprise if narration generation ever breaks across the board.
++- Could not live-test the actual network round-trip to Microsoft's TTS
++  endpoint from the sandbox this change was built in (its outbound network
++  allowlist only covers package registries, not arbitrary API hosts).
++  Verified instead: the package installs cleanly, its type definitions match
++  exactly how `synthesizeVoiceover()` calls it, and the integration code
++  follows the package's own documented usage pattern. This will make a real
++  network call the first time it runs in the user's own environment.
++
++## Next step
++Once the user has generated a few real voiceovers this way, revisit whether
++the default voice (`en-US-EmmaMultilingualNeural`) suits the channel's tone,
++or whether to make voice selection a per-story setting in Script Studio
++instead of a single global env var.
