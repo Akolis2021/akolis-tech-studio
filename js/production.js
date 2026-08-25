@@ -79,6 +79,7 @@ function populateProductionStudio(story) {
   _renderRenderManifest(story);
   switchProductionTab("timeline");
   refreshRenderJobs();
+  refreshAutopilotStatus();
 }
 
 // ---------- Tab switching ----------
@@ -309,6 +310,43 @@ function _renderRenderJobsList(jobs) {
       </div>
       <div class="meta">${job.progress ?? 0}%</div>
     </article>`).join("");
+
+  // Show a preview player for the most recently completed render.
+  const preview  = document.querySelector("#renderPreview");
+  const finished = jobs.find(j => j.status === "done" && j.outputUrl);
+  if (finished) {
+    preview.classList.remove("hidden");
+    preview.innerHTML = `
+      <div class="meta" style="margin-bottom:8px">Preview — ${escapeHtml(finished.presetLabel || finished.format)}</div>
+      <video controls preload="metadata" src="${escapeHtml(finished.outputUrl)}"></video>`;
+  } else {
+    preview.classList.add("hidden");
+    preview.innerHTML = "";
+  }
+}
+
+function _renderAutopilotStatus(job) {
+  const box = document.querySelector("#autopilotStatus");
+  const btn = document.querySelector("#runAutopilotBtn");
+  if (!job) { box.classList.add("hidden"); box.innerHTML = ""; return; }
+
+  box.classList.remove("hidden");
+  const running = job.status === "running" || job.status === "queued";
+  btn.disabled = running;
+  btn.textContent = running ? "Autopilot running…" : "✨ Run Autopilot";
+
+  const stageLabel = {
+    queued: "Queued…", "checking angle": "Checking editorial angle…",
+    "writing script": "Writing script…", rendering: "Rendering final video…", complete: "Done."
+  }[job.stage] || `Working — ${job.stage || "starting"}…`;
+
+  box.innerHTML = `
+    <div><strong>${job.status === "error" ? "Autopilot stopped" : job.status === "done" ? "Autopilot complete" : "Autopilot"}</strong> — ${escapeHtml(stageLabel)}</div>
+    ${job.error ? `<div style="color:var(--danger);margin-top:6px">${escapeHtml(job.error)}</div>` : ""}
+    ${(job.warnings || []).length
+      ? `<div style="color:var(--warning,#b58900);margin-top:6px">${job.warnings.map(escapeHtml).join(" · ")}</div>`
+      : ""}
+    ${job.status === "done" ? `<div class="meta" style="margin-top:6px">Check the Render tab to preview and, when you're happy with it, publish.</div>` : ""}`;
 }
 
 // ---------- Render jobs ----------
@@ -348,7 +386,35 @@ export function startRenderPoller() {
     const modal = document.querySelector("#productionStudioModal");
     if (!modal || modal.classList.contains("hidden")) return;
     await refreshRenderJobs();
+    await refreshAutopilotStatus();
   }, 3000);
+}
+
+// ---------- Autopilot ----------
+
+export async function refreshAutopilotStatus() {
+  if (!activeProductionStory) return;
+  try {
+    const jobs = await api(`/api/stories/${encodeURIComponent(activeProductionStory.id)}/autopilot`);
+    _renderAutopilotStatus(jobs[0] || null);
+    // A finished autopilot run produces a new render job — refresh that list too.
+    if (jobs[0]?.status === "done" || jobs[0]?.status === "error") await refreshRenderJobs();
+  } catch (error) {
+    console.warn("Autopilot poll failed:", error.message);
+  }
+}
+
+export async function runAutopilot() {
+  if (!activeProductionStory) return;
+  try {
+    await api(`/api/stories/${encodeURIComponent(activeProductionStory.id)}/autopilot`, {
+      method: "POST", body: JSON.stringify({})
+    });
+    showToast("Autopilot started.");
+    await refreshAutopilotStatus();
+  } catch (error) {
+    showToast(`Autopilot failed to start: ${error.message}`);
+  }
 }
 
 // ---------- Asset upload (general b-roll, unassigned) ----------

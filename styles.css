@@ -414,6 +414,15 @@ label { display: grid; gap: 7px; color: #d2d9e2; font-size: .9rem; }
 .job-status { font-weight: 800; font-size: .76rem; text-transform: uppercase; letter-spacing: .05em; }
 .job-status.queued { color: var(--warning); }
 .job-status.processing { color: var(--accent); }
-.job-status.completed { color: var(--success); }
-.job-status.failed { color: var(--danger); }
+.job-status.done { color: var(--success); }
+.job-status.error { color: var(--danger); }
 .job-link { color: #9dc7ff; text-decoration: none; }
+.autopilot-box {
+  display: flex; align-items: center; justify-content: space-between; gap: 16px;
+  background: var(--panel-3); border: 1px solid var(--border); border-radius: 12px;
+  padding: 14px 16px; margin-bottom: 14px;
+}
+.autopilot-box .primary-btn { white-space: nowrap; }
+@media (max-width: 780px) { .autopilot-box { flex-direction: column; align-items: stretch; } }
+.render-preview { margin-top: 16px; }
+.render-preview video { width: 100%; max-height: 420px; border-radius: 12px; border: 1px solid var(--border); background: #000; }

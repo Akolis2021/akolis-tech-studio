@@ -309,7 +309,19 @@
       </div>
 
       <div id="productionPanelTimeline" class="production-panel">
-        <p class="meta" style="margin-bottom:14px">
+        <div class="autopilot-box">
+          <div>
+            <strong>Autopilot</strong>
+            <p class="meta" style="margin:4px 0 0">
+              One click: writes the script if it's missing, generates voiceover for any scene without one
+              (Google TTS), fills in stock footage for any scene without your own clip (Pexels), then renders.
+              Your own uploaded footage/voiceover is never replaced. Publishing stays manual.
+            </p>
+          </div>
+          <button id="runAutopilotBtn" class="primary-btn">✨ Run Autopilot</button>
+        </div>
+        <div id="autopilotStatus" class="notice-box hidden"></div>
+        <p class="meta" style="margin:14px 0">
           Each scene needs its own footage and voiceover clip. Voiceover length sets the scene's
           exact duration and auto-generates timed captions — edit anything after generating.
         </p>
@@ -387,6 +399,7 @@
         <div id="renderNote" class="notice-box">
           Renders run through FFmpeg on the server: per-scene captions and overlays, transitions, and background music are all applied automatically.
         </div>
+        <div id="renderPreview" class="render-preview hidden"></div>
         <div id="renderJobs" class="render-jobs"></div>
       </div>
     </div>

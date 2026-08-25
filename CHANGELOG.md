@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-08-20 — Autopilot
+
+### Added
+
+- One-click hands-off pipeline: `POST /api/stories/:id/autopilot` writes the script if missing, generates per-scene voiceover via Google Cloud TTS for any scene without one, fetches stock b-roll via Pexels for any scene without footage, then queues a render — never overwriting footage/voiceover the user already attached themselves.
+- Standalone per-scene auto-fill endpoints: `POST /api/stories/:id/script/scenes/:sceneId/voiceover/auto` and `.../visual/auto`.
+- "✨ Run Autopilot" button and live status panel in Production Studio's Timeline tab; inline `<video>` preview player on the Render tab for the most recent completed render.
+- Requires an approved editorial angle before it will run — this is a deliberate, non-optional gate (see `logs/2026-08-20-autopilot.md`).
+- `backend/.env.example` documenting `GOOGLE_TTS_API_KEY`, `GOOGLE_TTS_VOICE`, `PEXELS_API_KEY`.
+
+### Fixed
+
+- `.job-status` CSS referenced `.completed`/`.failed` classes that the backend never actually emits (it emits `"done"`/`"error"`) — render job status text was rendering unstyled. Fixed to match.
+
 ## 2026-08-20 — Workflow clarity pass
 
 ### Changed

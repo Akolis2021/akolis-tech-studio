@@ -42,17 +42,19 @@ async function ensureStore() {
   try { await fs.access(DATA_FILE); }
   catch {
     await writeStore({
-      sources:    DEFAULT_SOURCES.map(s => ({ ...s, addedAt: new Date().toISOString() })),
-      stories:    [],
-      projects:   [],
-      renderJobs: []
+      sources:       DEFAULT_SOURCES.map(s => ({ ...s, addedAt: new Date().toISOString() })),
+      stories:       [],
+      projects:      [],
+      renderJobs:    [],
+      autopilotJobs: []
     });
   }
-  // Migrate existing stores that pre-date projects / renderJobs fields.
+  // Migrate existing stores that pre-date projects / renderJobs / autopilotJobs fields.
   const store = await readStore();
   let dirty = false;
-  if (!store.projects)   { store.projects   = []; dirty = true; }
-  if (!store.renderJobs) { store.renderJobs = []; dirty = true; }
+  if (!store.projects)      { store.projects      = []; dirty = true; }
+  if (!store.renderJobs)    { store.renderJobs    = []; dirty = true; }
+  if (!store.autopilotJobs) { store.autopilotJobs = []; dirty = true; }
   if (dirty) await writeStore(store);
 }
 
@@ -223,6 +225,231 @@ function escapeDrawtext(text = "") {
     .replace(/'/g, "\u2019")   // drawtext can't escape single quotes reliably; use a typographic apostrophe
     .replace(/%/g, "\\%")
     .replace(/\n/g, " ");
+}
+
+// Registers a production asset (footage / voiceover / music) on a story,
+// probing duration for audio/video and wiring up the same scene-timing +
+// caption + music-mix side effects regardless of whether the file came from
+// a manual upload, Google TTS, or a stock-footage fetch. `source` records
+// provenance ("creator" | "tts-google" | "stock-pexels").
+async function registerProductionAsset(story, storyId, {
+  filePath, fileName, mimeType, role, sceneId = null, requirementId = null, source = "creator"
+}) {
+  const stat = await fs.stat(filePath);
+  const mediaType = detectMediaType(mimeType, fileName);
+  const duration = (mediaType === "audio" || mediaType === "video")
+    ? await ffprobeDuration(filePath)
+    : null;
+
+  const asset = {
+    id:            crypto.randomUUID(),
+    fileName,
+    path:          filePath,
+    url:           `/media/uploads/${storyId}/${path.basename(filePath)}`,
+    mediaType,
+    role,
+    duration,
+    size:          stat.size,
+    status:        "ready",
+    source,
+    sceneId,
+    requirementId,
+    uploadedAt:    new Date().toISOString()
+  };
+
+  story.production        ||= { assets: [] };
+  story.production.assets ||= [];
+  story.production.assets.push(asset);
+
+  if (role === "voiceover" && asset.sceneId) {
+    const scenes = story.script?.scenes || [];
+    const scene  = scenes.find(s => s.id === asset.sceneId);
+    if (scene) {
+      scene.voiceoverAssetId = asset.id;
+      scene.durationSeconds  = asset.duration || scene.durationSeconds || 0;
+      scene.captions         = buildCaptionChunks(scene.voiceover || "", scene.durationSeconds);
+      if (scene.captionsEnabled === undefined) scene.captionsEnabled = true;
+    }
+  }
+
+  if (role === "music") {
+    story.production.music = {
+      assetId: asset.id,
+      volume:  story.production.music?.volume ?? 0.15,
+      enabled: true
+    };
+  }
+
+  return asset;
+}
+
+// Synthesizes narration audio for a single scene via the Google Cloud
+// Text-to-Speech REST API. Requires GOOGLE_TTS_API_KEY; voice defaults to
+// GOOGLE_TTS_VOICE or "en-US-Neural2-D". Scripts are well under the 5,000
+// byte per-request limit, so no chunking is needed at this app's scale.
+async function synthesizeVoiceover(text, destPath) {
+  const apiKey = process.env.GOOGLE_TTS_API_KEY;
+  if (!apiKey) throw new Error("GOOGLE_TTS_API_KEY is not configured on the server.");
+  const voiceName    = process.env.GOOGLE_TTS_VOICE || "en-US-Neural2-D";
+  const languageCode = voiceName.split("-").slice(0, 2).join("-") || "en-US";
+
+  const response = await fetch(`https://texttospeech.googleapis.com/v1/text:synthesize?key=${apiKey}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      input:       { text },
+      voice:       { languageCode, name: voiceName },
+      audioConfig: { audioEncoding: "MP3" }
+    })
+  });
+  if (!response.ok) {
+    const errText = await response.text().catch(() => "");
+    throw new Error(`Google TTS request failed (${response.status}): ${errText.slice(0, 200)}`);
+  }
+  const data = await response.json();
+  if (!data.audioContent) throw new Error("Google TTS returned no audio content.");
+  await fs.writeFile(destPath, Buffer.from(data.audioContent, "base64"));
+}
+
+// Fetches a stock b-roll clip matching a text query via the Pexels Videos
+// API. Requires PEXELS_API_KEY. Picks the largest MP4 file up to 1920px
+// wide (falls back to the largest available if no "hd" entry exists).
+async function fetchStockFootage(query, destPath) {
+  const apiKey = process.env.PEXELS_API_KEY;
+  if (!apiKey) throw new Error("PEXELS_API_KEY is not configured on the server.");
+
+  const searchUrl = `https://api.pexels.com/videos/search?query=${encodeURIComponent(query)}&per_page=5&orientation=landscape`;
+  const searchRes = await fetch(searchUrl, { headers: { Authorization: apiKey } });
+  if (!searchRes.ok) throw new Error(`Pexels search failed (${searchRes.status}).`);
+  const data  = await searchRes.json();
+  const video = (data.videos || [])[0];
+  if (!video) throw new Error(`No stock footage found for "${query}".`);
+
+  const files = (video.video_files || []).filter(f => f.file_type === "video/mp4");
+  const pick  = files.find(f => f.quality === "hd" && f.width <= 1920)
+    || files.sort((a, b) => (b.width || 0) - (a.width || 0))[0];
+  if (!pick) throw new Error(`No downloadable file found for "${query}".`);
+
+  const fileRes = await fetch(pick.link);
+  if (!fileRes.ok) throw new Error(`Failed to download stock footage (${fileRes.status}).`);
+  await fs.writeFile(destPath, Buffer.from(await fileRes.arrayBuffer()));
+}
+
+// Runs the full hands-off pipeline for one story: verifies an approved
+// angle exists (this is the one input we deliberately don't automate —
+// see logs/2026-08-20), generates the script/scenes if missing, fills in
+// any scene missing a voiceover via Google TTS and any scene missing
+// footage via Pexels stock search, then queues a long-form render. Publish
+// stays a separate, manual step.
+async function runAutopilot(jobId) {
+  const store = await readStore();
+  const job   = (store.autopilotJobs || []).find(j => j.id === jobId);
+  if (!job) return;
+  const story = store.stories.find(s => s.id === job.storyId);
+  if (!story) return await (async () => {
+    Object.assign(job, { status: "error", error: "Story not found." });
+    await writeStore(store);
+  })();
+
+  const setStage = async (stage) => { job.stage = stage; await writeStore(store); };
+
+  try {
+    job.status = "running";
+    await setStage("checking angle");
+
+    if (!(story.research?.approvedAngle || story.angle)) {
+      throw new Error("No approved editorial angle yet — approve one in Research Studio first.");
+    }
+
+    if (!story.script || !(story.script.scenes || []).length) {
+      await setStage("writing script");
+      story.script  = draftScriptPackage(story);
+      story.status  = "Script";
+      await writeStore(store);
+    }
+
+    const scenes = story.script.scenes || [];
+    const dir    = path.join(UPLOADS_DIR, story.id);
+    await fs.mkdir(dir, { recursive: true });
+
+    for (let i = 0; i < scenes.length; i++) {
+      const scene = scenes[i];
+      await setStage(`voiceover ${i + 1}/${scenes.length}`);
+      const hasVoiceover = (story.production?.assets || [])
+        .some(a => a.role === "voiceover" && a.sceneId === scene.id);
+      if (!hasVoiceover && scene.voiceover) {
+        try {
+          const dest = path.join(dir, `${Date.now()}-tts-${scene.id}.mp3`);
+          await synthesizeVoiceover(scene.voiceover, dest);
+          await registerProductionAsset(story, story.id, {
+            filePath: dest, fileName: path.basename(dest), mimeType: "audio/mpeg",
+            role: "voiceover", sceneId: scene.id, source: "tts-google"
+          });
+          await writeStore(store);
+        } catch (err) {
+          job.warnings ||= [];
+          job.warnings.push(`Scene ${i + 1} voiceover: ${err.message}`);
+        }
+      }
+    }
+
+    for (let i = 0; i < scenes.length; i++) {
+      const scene = scenes[i];
+      await setStage(`visuals ${i + 1}/${scenes.length}`);
+      const hasFootage = (story.production?.assets || [])
+        .some(a => a.role === "footage" && a.sceneId === scene.id);
+      if (!hasFootage) {
+        try {
+          const query = scene.onscreen || scene.title || story.title;
+          const dest  = path.join(dir, `${Date.now()}-stock-${scene.id}.mp4`);
+          await fetchStockFootage(query, dest);
+          await registerProductionAsset(story, story.id, {
+            filePath: dest, fileName: path.basename(dest), mimeType: "video/mp4",
+            role: "footage", sceneId: scene.id, source: "stock-pexels"
+          });
+          await writeStore(store);
+        } catch (err) {
+          job.warnings ||= [];
+          job.warnings.push(`Scene ${i + 1} visual: ${err.message}`);
+        }
+      }
+    }
+
+    await setStage("rendering");
+    const renderJob = {
+      id: crypto.randomUUID(), storyId: story.id, format: "long-form",
+      presetLabel: RENDER_PRESETS["long-form"].label, status: "queued", progress: 0,
+      warnings: [], createdAt: new Date().toISOString(), startedAt: null,
+      completedAt: null, outputUrl: null, error: null
+    };
+    store.renderJobs ||= [];
+    store.renderJobs.unshift(renderJob);
+    job.renderJobId = renderJob.id;
+    await writeStore(store);
+
+    await _runRender(renderJob.id, story, "long-form");
+
+    const finalStore = await readStore();
+    const finalRenderJob = (finalStore.renderJobs || []).find(j => j.id === renderJob.id);
+    const finalJob = (finalStore.autopilotJobs || []).find(j => j.id === jobId);
+    if (finalJob) {
+      finalJob.status      = finalRenderJob?.status === "error" ? "error" : "done";
+      finalJob.error       = finalRenderJob?.status === "error" ? finalRenderJob.error : null;
+      finalJob.outputUrl   = finalRenderJob?.outputUrl || null;
+      finalJob.completedAt = new Date().toISOString();
+      finalJob.stage       = "complete";
+      await writeStore(finalStore);
+    }
+  } catch (error) {
+    const errStore = await readStore();
+    const errJob = (errStore.autopilotJobs || []).find(j => j.id === jobId);
+    if (errJob) {
+      errJob.status = "error";
+      errJob.error  = error.message;
+      errJob.completedAt = new Date().toISOString();
+      await writeStore(errStore);
+    }
+  }
 }
 
 // Splits narration text into caption chunks (~7 words each) and distributes
@@ -861,58 +1088,15 @@ async function handleApi(req, res) {
     if (!uploaded.saved) return json(res, 400, { error: "No file received." });
 
     const { dest, filename, mimeType } = uploaded.saved;
-    const stat = await fs.stat(dest);
     // role: 'footage' (default, video/image b-roll) | 'voiceover' (per-scene narration audio) | 'music' (global background track)
     const role = ["footage", "voiceover", "music"].includes(uploaded.meta.role) ? uploaded.meta.role : "footage";
-    const mediaType = detectMediaType(mimeType, filename);
 
-    // Audio/video assets get their duration probed immediately — this drives
-    // scene timing (for voiceover) and looping/trimming (for music).
-    const duration = (mediaType === "audio" || mediaType === "video")
-      ? await ffprobeDuration(dest)
-      : null;
-
-    const asset = {
-      id:            crypto.randomUUID(),
-      fileName:      filename,
-      path:          dest,
-      url:           `/media/uploads/${storyId}/${path.basename(dest)}`,
-      mediaType,
-      role,
-      duration,
-      size:          stat.size,
-      status:        "ready",
-      source:        "creator",
+    await registerProductionAsset(story, storyId, {
+      filePath: dest, fileName: filename, mimeType, role,
       sceneId:       uploaded.meta.sceneId       || null,
       requirementId: uploaded.meta.requirementId || null,
-      uploadedAt:    new Date().toISOString()
-    };
-
-    story.production         ||= { assets: [] };
-    story.production.assets  ||= [];
-    story.production.assets.push(asset);
-
-    if (role === "voiceover" && asset.sceneId) {
-      // Voiceover duration becomes the scene's authoritative duration, and
-      // captions are auto-generated from the scene's own narration text,
-      // timed proportionally across that duration. Editable afterward.
-      const scenes = story.script?.scenes || [];
-      const scene  = scenes.find(s => s.id === asset.sceneId);
-      if (scene) {
-        scene.voiceoverAssetId = asset.id;
-        scene.durationSeconds  = asset.duration || scene.durationSeconds || 0;
-        scene.captions         = buildCaptionChunks(scene.voiceover || "", scene.durationSeconds);
-        if (scene.captionsEnabled === undefined) scene.captionsEnabled = true;
-      }
-    }
-
-    if (role === "music") {
-      story.production.music = {
-        assetId: asset.id,
-        volume:  story.production.music?.volume ?? 0.15,
-        enabled: true
-      };
-    }
+      source: "creator"
+    });
 
     await writeStore(store);
     return json(res, 200, story);
@@ -940,6 +1124,87 @@ async function handleApi(req, res) {
     scene.captionsEnabled = true;
     await writeStore(store);
     return json(res, 200, story);
+  }
+
+  // Auto-generate a single scene's voiceover via Google TTS.
+  const autoVoiceoverMatch = pathname.match(/^\/api\/stories\/([^/]+)\/script\/scenes\/([^/]+)\/voiceover\/auto$/);
+  if (autoVoiceoverMatch && req.method === "POST") {
+    const story   = getStoryOrThrow(store, decodeURIComponent(autoVoiceoverMatch[1]));
+    const sceneId = decodeURIComponent(autoVoiceoverMatch[2]);
+    const scene   = (story.script?.scenes || []).find(s => s.id === sceneId);
+    if (!scene) return json(res, 404, { error: "Scene not found" });
+    if (!scene.voiceover) return json(res, 400, { error: "This scene has no narration text to synthesize." });
+
+    try {
+      const dir  = path.join(UPLOADS_DIR, story.id);
+      await fs.mkdir(dir, { recursive: true });
+      const dest = path.join(dir, `${Date.now()}-tts-${scene.id}.mp3`);
+      await synthesizeVoiceover(scene.voiceover, dest);
+      await registerProductionAsset(story, story.id, {
+        filePath: dest, fileName: path.basename(dest), mimeType: "audio/mpeg",
+        role: "voiceover", sceneId: scene.id, source: "tts-google"
+      });
+      await writeStore(store);
+      return json(res, 200, story);
+    } catch (error) {
+      return json(res, 502, { error: error.message });
+    }
+  }
+
+  // Auto-attach stock footage to a single scene via Pexels.
+  const autoVisualMatch = pathname.match(/^\/api\/stories\/([^/]+)\/script\/scenes\/([^/]+)\/visual\/auto$/);
+  if (autoVisualMatch && req.method === "POST") {
+    const story   = getStoryOrThrow(store, decodeURIComponent(autoVisualMatch[1]));
+    const sceneId = decodeURIComponent(autoVisualMatch[2]);
+    const scene   = (story.script?.scenes || []).find(s => s.id === sceneId);
+    if (!scene) return json(res, 404, { error: "Scene not found" });
+
+    try {
+      const dir   = path.join(UPLOADS_DIR, story.id);
+      await fs.mkdir(dir, { recursive: true });
+      const dest  = path.join(dir, `${Date.now()}-stock-${scene.id}.mp4`);
+      const query = scene.onscreen || scene.title || story.title;
+      await fetchStockFootage(query, dest);
+      await registerProductionAsset(story, story.id, {
+        filePath: dest, fileName: path.basename(dest), mimeType: "video/mp4",
+        role: "footage", sceneId: scene.id, source: "stock-pexels"
+      });
+      await writeStore(store);
+      return json(res, 200, story);
+    } catch (error) {
+      return json(res, 502, { error: error.message });
+    }
+  }
+
+  // ── Autopilot: script → voiceover → visuals → render, hands-off ─────────────
+
+  const autopilotMatch = pathname.match(/^\/api\/stories\/([^/]+)\/autopilot$/);
+  if (autopilotMatch && req.method === "GET") {
+    const storyId = decodeURIComponent(autopilotMatch[1]);
+    const jobs = (store.autopilotJobs || []).filter(j => j.storyId === storyId);
+    return json(res, 200, jobs);
+  }
+  if (autopilotMatch && req.method === "POST") {
+    const storyId = decodeURIComponent(autopilotMatch[1]);
+    const story   = getStoryOrThrow(store, storyId);
+
+    if (!(story.research?.approvedAngle || story.angle)) {
+      return json(res, 400, { error: "Approve an editorial angle in Research Studio before running Autopilot." });
+    }
+
+    const job = {
+      id: crypto.randomUUID(), storyId, status: "queued", stage: "queued",
+      warnings: [], renderJobId: null, outputUrl: null, error: null,
+      createdAt: new Date().toISOString(), completedAt: null
+    };
+    store.autopilotJobs ||= [];
+    store.autopilotJobs.unshift(job);
+    await writeStore(store);
+
+    // Run the full pipeline asynchronously — do not await.
+    runAutopilot(job.id).catch(err => console.error("Autopilot error for job", job.id, err.message));
+
+    return json(res, 202, { job });
   }
 
   if (req.method === "GET" && pathname === "/api/render-presets") {

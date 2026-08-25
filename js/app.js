@@ -24,7 +24,7 @@ import {
   removeProductionAsset, startRenderPoller,
   toggleCaptionsEnabled, regenerateCaptions,
   toggleIncludeInShort, addOverlay, removeOverlay,
-  saveMusicSettings, saveMixSettings
+  saveMusicSettings, saveMixSettings, runAutopilot
 } from "./production.js";
 
 // ─── Initialization ───────────────────────────────────────────────────────────
@@ -274,6 +274,7 @@ document.querySelectorAll(".production-tab").forEach(btn =>
   btn.addEventListener("click", () => switchProductionTab(btn.dataset.tab))
 );
 document.querySelector("#prepareRenderBtn").addEventListener("click",    createRenderJob);
+document.querySelector("#runAutopilotBtn").addEventListener("click",     runAutopilot);
 document.querySelector("#downloadManifestBtn").addEventListener("click", downloadManifest);
 document.querySelector("#saveMusicSettingsBtn").addEventListener("click", saveMusicSettings);
 document.querySelector("#saveMixSettingsBtn").addEventListener("click",   saveMixSettings);
