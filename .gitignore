@@ -5,3 +5,4 @@ backend/renders/*
 backend/logs/
 .env
 .DS_Store
+*.patch
