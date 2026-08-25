@@ -1,0 +1,1936 @@
+diff --git a/autopilot.patch b/autopilot.patch
+deleted file mode 100644
+index a4e74bb..0000000
+--- a/autopilot.patch
++++ /dev/null
+@@ -1,898 +0,0 @@
+-diff --git a/CHANGELOG.md b/CHANGELOG.md
+-index 79410a5..eea1ab1 100644
+---- a/CHANGELOG.md
+-+++ b/CHANGELOG.md
+-@@ -1,5 +1,19 @@
+- # Changelog
+- 
+-+## 2026-08-20 — Autopilot
+-+
+-+### Added
+-+
+-+- One-click hands-off pipeline: `POST /api/stories/:id/autopilot` writes the script if missing, generates per-scene voiceover via Google Cloud TTS for any scene without one, fetches stock b-roll via Pexels for any scene without footage, then queues a render — never overwriting footage/voiceover the user already attached themselves.
+-+- Standalone per-scene auto-fill endpoints: `POST /api/stories/:id/script/scenes/:sceneId/voiceover/auto` and `.../visual/auto`.
+-+- "✨ Run Autopilot" button and live status panel in Production Studio's Timeline tab; inline `<video>` preview player on the Render tab for the most recent completed render.
+-+- Requires an approved editorial angle before it will run — this is a deliberate, non-optional gate (see `logs/2026-08-20-autopilot.md`).
+-+- `backend/.env.example` documenting `GOOGLE_TTS_API_KEY`, `GOOGLE_TTS_VOICE`, `PEXELS_API_KEY`.
+-+
+-+### Fixed
+-+
+-+- `.job-status` CSS referenced `.completed`/`.failed` classes that the backend never actually emits (it emits `"done"`/`"error"`) — render job status text was rendering unstyled. Fixed to match.
+-+
+- ## 2026-08-20 — Workflow clarity pass
+- 
+- ### Changed
+-diff --git a/backend/.env.example b/backend/.env.example
+-new file mode 100644
+-index 0000000..a2397ee
+---- /dev/null
+-+++ b/backend/.env.example
+-@@ -0,0 +1,21 @@
+-+# Copy this file to .env and fill in your own keys. Never commit .env.
+-+# Node loads it automatically if you start the server with:
+-+#   node --env-file=.env server.js
+-+
+-+# Google Cloud Text-to-Speech — used by Autopilot to generate scene voiceover.
+-+# Free tier: 4M chars/month (Standard), 1M chars/month (WaveNet/Neural2/Chirp3).
+-+# Get a key: https://console.cloud.google.com/apis/credentials
+-+# (enable the "Cloud Text-to-Speech API" on your project first)
+-+GOOGLE_TTS_API_KEY=
+-+
+-+# Optional — defaults to en-US-Neural2-D if not set.
+-+# Browse voices: https://cloud.google.com/text-to-speech/docs/voices
+-+GOOGLE_TTS_VOICE=en-US-Neural2-D
+-+
+-+# Pexels — used by Autopilot to fetch stock b-roll for scenes with no
+-+# footage of your own attached. Free, no card required.
+-+# Get a key: https://www.pexels.com/api/
+-+PEXELS_API_KEY=
+-+
+-+# Optional — server port, defaults to 3000.
+-+PORT=3000
+-diff --git a/backend/README.md b/backend/README.md
+-index 3ac40f7..5204cb0 100644
+---- a/backend/README.md
+-+++ b/backend/README.md
+-@@ -1,4 +1,4 @@
+--# Backend — V7
+-+# Backend
+- 
+- ## Run
+- 
+-@@ -7,6 +7,12 @@ npm install
+- npm start
+- ```
+- 
+-+To enable Autopilot (see below), start with your `.env` loaded instead:
+-+
+-+```bash
+-+node --env-file=.env server.js
+-+```
+-+
+- ## Requirements
+- 
+- Node.js and FFmpeg must be installed.
+-@@ -25,6 +31,24 @@ The result includes:
+- }
+- ```
+- 
+-+## Autopilot setup (optional)
+-+
+-+Autopilot fills in anything missing on a story — script, per-scene voiceover,
+-+per-scene stock footage — then renders, all from one click in Production
+-+Studio's Timeline tab. It never overwrites footage/voiceover you've already
+-+attached yourself.
+-+
+-+1. Copy `.env.example` to `.env`.
+-+2. Fill in `GOOGLE_TTS_API_KEY` (Google Cloud Text-to-Speech — has a
+-+   recurring monthly free tier, see `.env.example` for details) and
+-+   `PEXELS_API_KEY` (free, no card required).
+-+3. Start the server with `node --env-file=.env server.js` instead of
+-+   `npm start` so the keys are loaded.
+-+
+-+Without either key set, Autopilot still runs — it'll write the script and
+-+attempt the render, but scenes missing voiceover/footage will show up as
+-+warnings on the job instead of silently failing.
+-+
+- ## Media endpoints
+- 
+- Uploads:
+-@@ -37,6 +61,18 @@ Render:
+- 
+- `GET /api/stories/:id/render`
+- 
+-+Autopilot:
+-+
+-+`POST /api/stories/:id/autopilot` — kicks off the full hands-off pipeline (requires an approved angle first)
+-+
+-+`GET /api/stories/:id/autopilot` — poll job status/stage/warnings
+-+
+-+Per-scene auto-fill (used internally by Autopilot, also callable directly):
+-+
+-+`POST /api/stories/:id/script/scenes/:sceneId/voiceover/auto`
+-+
+-+`POST /api/stories/:id/script/scenes/:sceneId/visual/auto`
+-+
+- Media is served from:
+- 
+- `/media/uploads/...`
+-diff --git a/backend/server.js b/backend/server.js
+-index e82b05b..c7c245e 100644
+---- a/backend/server.js
+-+++ b/backend/server.js
+-@@ -42,17 +42,19 @@ async function ensureStore() {
+-   try { await fs.access(DATA_FILE); }
+-   catch {
+-     await writeStore({
+--      sources:    DEFAULT_SOURCES.map(s => ({ ...s, addedAt: new Date().toISOString() })),
+--      stories:    [],
+--      projects:   [],
+--      renderJobs: []
+-+      sources:       DEFAULT_SOURCES.map(s => ({ ...s, addedAt: new Date().toISOString() })),
+-+      stories:       [],
+-+      projects:      [],
+-+      renderJobs:    [],
+-+      autopilotJobs: []
+-     });
+-   }
+--  // Migrate existing stores that pre-date projects / renderJobs fields.
+-+  // Migrate existing stores that pre-date projects / renderJobs / autopilotJobs fields.
+-   const store = await readStore();
+-   let dirty = false;
+--  if (!store.projects)   { store.projects   = []; dirty = true; }
+--  if (!store.renderJobs) { store.renderJobs = []; dirty = true; }
+-+  if (!store.projects)      { store.projects      = []; dirty = true; }
+-+  if (!store.renderJobs)    { store.renderJobs    = []; dirty = true; }
+-+  if (!store.autopilotJobs) { store.autopilotJobs = []; dirty = true; }
+-   if (dirty) await writeStore(store);
+- }
+- 
+-@@ -225,6 +227,231 @@ function escapeDrawtext(text = "") {
+-     .replace(/\n/g, " ");
+- }
+- 
+-+// Registers a production asset (footage / voiceover / music) on a story,
+-+// probing duration for audio/video and wiring up the same scene-timing +
+-+// caption + music-mix side effects regardless of whether the file came from
+-+// a manual upload, Google TTS, or a stock-footage fetch. `source` records
+-+// provenance ("creator" | "tts-google" | "stock-pexels").
+-+async function registerProductionAsset(story, storyId, {
+-+  filePath, fileName, mimeType, role, sceneId = null, requirementId = null, source = "creator"
+-+}) {
+-+  const stat = await fs.stat(filePath);
+-+  const mediaType = detectMediaType(mimeType, fileName);
+-+  const duration = (mediaType === "audio" || mediaType === "video")
+-+    ? await ffprobeDuration(filePath)
+-+    : null;
+-+
+-+  const asset = {
+-+    id:            crypto.randomUUID(),
+-+    fileName,
+-+    path:          filePath,
+-+    url:           `/media/uploads/${storyId}/${path.basename(filePath)}`,
+-+    mediaType,
+-+    role,
+-+    duration,
+-+    size:          stat.size,
+-+    status:        "ready",
+-+    source,
+-+    sceneId,
+-+    requirementId,
+-+    uploadedAt:    new Date().toISOString()
+-+  };
+-+
+-+  story.production        ||= { assets: [] };
+-+  story.production.assets ||= [];
+-+  story.production.assets.push(asset);
+-+
+-+  if (role === "voiceover" && asset.sceneId) {
+-+    const scenes = story.script?.scenes || [];
+-+    const scene  = scenes.find(s => s.id === asset.sceneId);
+-+    if (scene) {
+-+      scene.voiceoverAssetId = asset.id;
+-+      scene.durationSeconds  = asset.duration || scene.durationSeconds || 0;
+-+      scene.captions         = buildCaptionChunks(scene.voiceover || "", scene.durationSeconds);
+-+      if (scene.captionsEnabled === undefined) scene.captionsEnabled = true;
+-+    }
+-+  }
+-+
+-+  if (role === "music") {
+-+    story.production.music = {
+-+      assetId: asset.id,
+-+      volume:  story.production.music?.volume ?? 0.15,
+-+      enabled: true
+-+    };
+-+  }
+-+
+-+  return asset;
+-+}
+-+
+-+// Synthesizes narration audio for a single scene via the Google Cloud
+-+// Text-to-Speech REST API. Requires GOOGLE_TTS_API_KEY; voice defaults to
+-+// GOOGLE_TTS_VOICE or "en-US-Neural2-D". Scripts are well under the 5,000
+-+// byte per-request limit, so no chunking is needed at this app's scale.
+-+async function synthesizeVoiceover(text, destPath) {
+-+  const apiKey = process.env.GOOGLE_TTS_API_KEY;
+-+  if (!apiKey) throw new Error("GOOGLE_TTS_API_KEY is not configured on the server.");
+-+  const voiceName    = process.env.GOOGLE_TTS_VOICE || "en-US-Neural2-D";
+-+  const languageCode = voiceName.split("-").slice(0, 2).join("-") || "en-US";
+-+
+-+  const response = await fetch(`https://texttospeech.googleapis.com/v1/text:synthesize?key=${apiKey}`, {
+-+    method: "POST",
+-+    headers: { "Content-Type": "application/json" },
+-+    body: JSON.stringify({
+-+      input:       { text },
+-+      voice:       { languageCode, name: voiceName },
+-+      audioConfig: { audioEncoding: "MP3" }
+-+    })
+-+  });
+-+  if (!response.ok) {
+-+    const errText = await response.text().catch(() => "");
+-+    throw new Error(`Google TTS request failed (${response.status}): ${errText.slice(0, 200)}`);
+-+  }
+-+  const data = await response.json();
+-+  if (!data.audioContent) throw new Error("Google TTS returned no audio content.");
+-+  await fs.writeFile(destPath, Buffer.from(data.audioContent, "base64"));
+-+}
+-+
+-+// Fetches a stock b-roll clip matching a text query via the Pexels Videos
+-+// API. Requires PEXELS_API_KEY. Picks the largest MP4 file up to 1920px
+-+// wide (falls back to the largest available if no "hd" entry exists).
+-+async function fetchStockFootage(query, destPath) {
+-+  const apiKey = process.env.PEXELS_API_KEY;
+-+  if (!apiKey) throw new Error("PEXELS_API_KEY is not configured on the server.");
+-+
+-+  const searchUrl = `https://api.pexels.com/videos/search?query=${encodeURIComponent(query)}&per_page=5&orientation=landscape`;
+-+  const searchRes = await fetch(searchUrl, { headers: { Authorization: apiKey } });
+-+  if (!searchRes.ok) throw new Error(`Pexels search failed (${searchRes.status}).`);
+-+  const data  = await searchRes.json();
+-+  const video = (data.videos || [])[0];
+-+  if (!video) throw new Error(`No stock footage found for "${query}".`);
+-+
+-+  const files = (video.video_files || []).filter(f => f.file_type === "video/mp4");
+-+  const pick  = files.find(f => f.quality === "hd" && f.width <= 1920)
+-+    || files.sort((a, b) => (b.width || 0) - (a.width || 0))[0];
+-+  if (!pick) throw new Error(`No downloadable file found for "${query}".`);
+-+
+-+  const fileRes = await fetch(pick.link);
+-+  if (!fileRes.ok) throw new Error(`Failed to download stock footage (${fileRes.status}).`);
+-+  await fs.writeFile(destPath, Buffer.from(await fileRes.arrayBuffer()));
+-+}
+-+
+-+// Runs the full hands-off pipeline for one story: verifies an approved
+-+// angle exists (this is the one input we deliberately don't automate —
+-+// see logs/2026-08-20), generates the script/scenes if missing, fills in
+-+// any scene missing a voiceover via Google TTS and any scene missing
+-+// footage via Pexels stock search, then queues a long-form render. Publish
+-+// stays a separate, manual step.
+-+async function runAutopilot(jobId) {
+-+  const store = await readStore();
+-+  const job   = (store.autopilotJobs || []).find(j => j.id === jobId);
+-+  if (!job) return;
+-+  const story = store.stories.find(s => s.id === job.storyId);
+-+  if (!story) return await (async () => {
+-+    Object.assign(job, { status: "error", error: "Story not found." });
+-+    await writeStore(store);
+-+  })();
+-+
+-+  const setStage = async (stage) => { job.stage = stage; await writeStore(store); };
+-+
+-+  try {
+-+    job.status = "running";
+-+    await setStage("checking angle");
+-+
+-+    if (!(story.research?.approvedAngle || story.angle)) {
+-+      throw new Error("No approved editorial angle yet — approve one in Research Studio first.");
+-+    }
+-+
+-+    if (!story.script || !(story.script.scenes || []).length) {
+-+      await setStage("writing script");
+-+      story.script  = draftScriptPackage(story);
+-+      story.status  = "Script";
+-+      await writeStore(store);
+-+    }
+-+
+-+    const scenes = story.script.scenes || [];
+-+    const dir    = path.join(UPLOADS_DIR, story.id);
+-+    await fs.mkdir(dir, { recursive: true });
+-+
+-+    for (let i = 0; i < scenes.length; i++) {
+-+      const scene = scenes[i];
+-+      await setStage(`voiceover ${i + 1}/${scenes.length}`);
+-+      const hasVoiceover = (story.production?.assets || [])
+-+        .some(a => a.role === "voiceover" && a.sceneId === scene.id);
+-+      if (!hasVoiceover && scene.voiceover) {
+-+        try {
+-+          const dest = path.join(dir, `${Date.now()}-tts-${scene.id}.mp3`);
+-+          await synthesizeVoiceover(scene.voiceover, dest);
+-+          await registerProductionAsset(story, story.id, {
+-+            filePath: dest, fileName: path.basename(dest), mimeType: "audio/mpeg",
+-+            role: "voiceover", sceneId: scene.id, source: "tts-google"
+-+          });
+-+          await writeStore(store);
+-+        } catch (err) {
+-+          job.warnings ||= [];
+-+          job.warnings.push(`Scene ${i + 1} voiceover: ${err.message}`);
+-+        }
+-+      }
+-+    }
+-+
+-+    for (let i = 0; i < scenes.length; i++) {
+-+      const scene = scenes[i];
+-+      await setStage(`visuals ${i + 1}/${scenes.length}`);
+-+      const hasFootage = (story.production?.assets || [])
+-+        .some(a => a.role === "footage" && a.sceneId === scene.id);
+-+      if (!hasFootage) {
+-+        try {
+-+          const query = scene.onscreen || scene.title || story.title;
+-+          const dest  = path.join(dir, `${Date.now()}-stock-${scene.id}.mp4`);
+-+          await fetchStockFootage(query, dest);
+-+          await registerProductionAsset(story, story.id, {
+-+            filePath: dest, fileName: path.basename(dest), mimeType: "video/mp4",
+-+            role: "footage", sceneId: scene.id, source: "stock-pexels"
+-+          });
+-+          await writeStore(store);
+-+        } catch (err) {
+-+          job.warnings ||= [];
+-+          job.warnings.push(`Scene ${i + 1} visual: ${err.message}`);
+-+        }
+-+      }
+-+    }
+-+
+-+    await setStage("rendering");
+-+    const renderJob = {
+-+      id: crypto.randomUUID(), storyId: story.id, format: "long-form",
+-+      presetLabel: RENDER_PRESETS["long-form"].label, status: "queued", progress: 0,
+-+      warnings: [], createdAt: new Date().toISOString(), startedAt: null,
+-+      completedAt: null, outputUrl: null, error: null
+-+    };
+-+    store.renderJobs ||= [];
+-+    store.renderJobs.unshift(renderJob);
+-+    job.renderJobId = renderJob.id;
+-+    await writeStore(store);
+-+
+-+    await _runRender(renderJob.id, story, "long-form");
+-+
+-+    const finalStore = await readStore();
+-+    const finalRenderJob = (finalStore.renderJobs || []).find(j => j.id === renderJob.id);
+-+    const finalJob = (finalStore.autopilotJobs || []).find(j => j.id === jobId);
+-+    if (finalJob) {
+-+      finalJob.status      = finalRenderJob?.status === "error" ? "error" : "done";
+-+      finalJob.error       = finalRenderJob?.status === "error" ? finalRenderJob.error : null;
+-+      finalJob.outputUrl   = finalRenderJob?.outputUrl || null;
+-+      finalJob.completedAt = new Date().toISOString();
+-+      finalJob.stage       = "complete";
+-+      await writeStore(finalStore);
+-+    }
+-+  } catch (error) {
+-+    const errStore = await readStore();
+-+    const errJob = (errStore.autopilotJobs || []).find(j => j.id === jobId);
+-+    if (errJob) {
+-+      errJob.status = "error";
+-+      errJob.error  = error.message;
+-+      errJob.completedAt = new Date().toISOString();
+-+      await writeStore(errStore);
+-+    }
+-+  }
+-+}
+-+
+- // Splits narration text into caption chunks (~7 words each) and distributes
+- // them proportionally across the scene duration by word count. This is a
+- // simple, deterministic timing model — not real forced alignment — but it
+-@@ -861,58 +1088,15 @@ async function handleApi(req, res) {
+-     if (!uploaded.saved) return json(res, 400, { error: "No file received." });
+- 
+-     const { dest, filename, mimeType } = uploaded.saved;
+--    const stat = await fs.stat(dest);
+-     // role: 'footage' (default, video/image b-roll) | 'voiceover' (per-scene narration audio) | 'music' (global background track)
+-     const role = ["footage", "voiceover", "music"].includes(uploaded.meta.role) ? uploaded.meta.role : "footage";
+--    const mediaType = detectMediaType(mimeType, filename);
+--
+--    // Audio/video assets get their duration probed immediately — this drives
+--    // scene timing (for voiceover) and looping/trimming (for music).
+--    const duration = (mediaType === "audio" || mediaType === "video")
+--      ? await ffprobeDuration(dest)
+--      : null;
+--
+--    const asset = {
+--      id:            crypto.randomUUID(),
+--      fileName:      filename,
+--      path:          dest,
+--      url:           `/media/uploads/${storyId}/${path.basename(dest)}`,
+--      mediaType,
+--      role,
+--      duration,
+--      size:          stat.size,
+--      status:        "ready",
+--      source:        "creator",
+-+
+-+    await registerProductionAsset(story, storyId, {
+-+      filePath: dest, fileName: filename, mimeType, role,
+-       sceneId:       uploaded.meta.sceneId       || null,
+-       requirementId: uploaded.meta.requirementId || null,
+--      uploadedAt:    new Date().toISOString()
+--    };
+--
+--    story.production         ||= { assets: [] };
+--    story.production.assets  ||= [];
+--    story.production.assets.push(asset);
+--
+--    if (role === "voiceover" && asset.sceneId) {
+--      // Voiceover duration becomes the scene's authoritative duration, and
+--      // captions are auto-generated from the scene's own narration text,
+--      // timed proportionally across that duration. Editable afterward.
+--      const scenes = story.script?.scenes || [];
+--      const scene  = scenes.find(s => s.id === asset.sceneId);
+--      if (scene) {
+--        scene.voiceoverAssetId = asset.id;
+--        scene.durationSeconds  = asset.duration || scene.durationSeconds || 0;
+--        scene.captions         = buildCaptionChunks(scene.voiceover || "", scene.durationSeconds);
+--        if (scene.captionsEnabled === undefined) scene.captionsEnabled = true;
+--      }
+--    }
+--
+--    if (role === "music") {
+--      story.production.music = {
+--        assetId: asset.id,
+--        volume:  story.production.music?.volume ?? 0.15,
+--        enabled: true
+--      };
+--    }
+-+      source: "creator"
+-+    });
+- 
+-     await writeStore(store);
+-     return json(res, 200, story);
+-@@ -942,6 +1126,87 @@ async function handleApi(req, res) {
+-     return json(res, 200, story);
+-   }
+- 
+-+  // Auto-generate a single scene's voiceover via Google TTS.
+-+  const autoVoiceoverMatch = pathname.match(/^\/api\/stories\/([^/]+)\/script\/scenes\/([^/]+)\/voiceover\/auto$/);
+-+  if (autoVoiceoverMatch && req.method === "POST") {
+-+    const story   = getStoryOrThrow(store, decodeURIComponent(autoVoiceoverMatch[1]));
+-+    const sceneId = decodeURIComponent(autoVoiceoverMatch[2]);
+-+    const scene   = (story.script?.scenes || []).find(s => s.id === sceneId);
+-+    if (!scene) return json(res, 404, { error: "Scene not found" });
+-+    if (!scene.voiceover) return json(res, 400, { error: "This scene has no narration text to synthesize." });
+-+
+-+    try {
+-+      const dir  = path.join(UPLOADS_DIR, story.id);
+-+      await fs.mkdir(dir, { recursive: true });
+-+      const dest = path.join(dir, `${Date.now()}-tts-${scene.id}.mp3`);
+-+      await synthesizeVoiceover(scene.voiceover, dest);
+-+      await registerProductionAsset(story, story.id, {
+-+        filePath: dest, fileName: path.basename(dest), mimeType: "audio/mpeg",
+-+        role: "voiceover", sceneId: scene.id, source: "tts-google"
+-+      });
+-+      await writeStore(store);
+-+      return json(res, 200, story);
+-+    } catch (error) {
+-+      return json(res, 502, { error: error.message });
+-+    }
+-+  }
+-+
+-+  // Auto-attach stock footage to a single scene via Pexels.
+-+  const autoVisualMatch = pathname.match(/^\/api\/stories\/([^/]+)\/script\/scenes\/([^/]+)\/visual\/auto$/);
+-+  if (autoVisualMatch && req.method === "POST") {
+-+    const story   = getStoryOrThrow(store, decodeURIComponent(autoVisualMatch[1]));
+-+    const sceneId = decodeURIComponent(autoVisualMatch[2]);
+-+    const scene   = (story.script?.scenes || []).find(s => s.id === sceneId);
+-+    if (!scene) return json(res, 404, { error: "Scene not found" });
+-+
+-+    try {
+-+      const dir   = path.join(UPLOADS_DIR, story.id);
+-+      await fs.mkdir(dir, { recursive: true });
+-+      const dest  = path.join(dir, `${Date.now()}-stock-${scene.id}.mp4`);
+-+      const query = scene.onscreen || scene.title || story.title;
+-+      await fetchStockFootage(query, dest);
+-+      await registerProductionAsset(story, story.id, {
+-+        filePath: dest, fileName: path.basename(dest), mimeType: "video/mp4",
+-+        role: "footage", sceneId: scene.id, source: "stock-pexels"
+-+      });
+-+      await writeStore(store);
+-+      return json(res, 200, story);
+-+    } catch (error) {
+-+      return json(res, 502, { error: error.message });
+-+    }
+-+  }
+-+
+-+  // ── Autopilot: script → voiceover → visuals → render, hands-off ─────────────
+-+
+-+  const autopilotMatch = pathname.match(/^\/api\/stories\/([^/]+)\/autopilot$/);
+-+  if (autopilotMatch && req.method === "GET") {
+-+    const storyId = decodeURIComponent(autopilotMatch[1]);
+-+    const jobs = (store.autopilotJobs || []).filter(j => j.storyId === storyId);
+-+    return json(res, 200, jobs);
+-+  }
+-+  if (autopilotMatch && req.method === "POST") {
+-+    const storyId = decodeURIComponent(autopilotMatch[1]);
+-+    const story   = getStoryOrThrow(store, storyId);
+-+
+-+    if (!(story.research?.approvedAngle || story.angle)) {
+-+      return json(res, 400, { error: "Approve an editorial angle in Research Studio before running Autopilot." });
+-+    }
+-+
+-+    const job = {
+-+      id: crypto.randomUUID(), storyId, status: "queued", stage: "queued",
+-+      warnings: [], renderJobId: null, outputUrl: null, error: null,
+-+      createdAt: new Date().toISOString(), completedAt: null
+-+    };
+-+    store.autopilotJobs ||= [];
+-+    store.autopilotJobs.unshift(job);
+-+    await writeStore(store);
+-+
+-+    // Run the full pipeline asynchronously — do not await.
+-+    runAutopilot(job.id).catch(err => console.error("Autopilot error for job", job.id, err.message));
+-+
+-+    return json(res, 202, { job });
+-+  }
+-+
+-   if (req.method === "GET" && pathname === "/api/render-presets") {
+-     const presets = Object.entries(RENDER_PRESETS).map(([key, p]) => ({ key, ...p }));
+-     return json(res, 200, presets);
+-diff --git a/index.html b/index.html
+-index 756afc0..cc0b63a 100644
+---- a/index.html
+-+++ b/index.html
+-@@ -309,7 +309,19 @@
+-       </div>
+- 
+-       <div id="productionPanelTimeline" class="production-panel">
+--        <p class="meta" style="margin-bottom:14px">
+-+        <div class="autopilot-box">
+-+          <div>
+-+            <strong>Autopilot</strong>
+-+            <p class="meta" style="margin:4px 0 0">
+-+              One click: writes the script if it's missing, generates voiceover for any scene without one
+-+              (Google TTS), fills in stock footage for any scene without your own clip (Pexels), then renders.
+-+              Your own uploaded footage/voiceover is never replaced. Publishing stays manual.
+-+            </p>
+-+          </div>
+-+          <button id="runAutopilotBtn" class="primary-btn">✨ Run Autopilot</button>
+-+        </div>
+-+        <div id="autopilotStatus" class="notice-box hidden"></div>
+-+        <p class="meta" style="margin:14px 0">
+-           Each scene needs its own footage and voiceover clip. Voiceover length sets the scene's
+-           exact duration and auto-generates timed captions — edit anything after generating.
+-         </p>
+-@@ -387,6 +399,7 @@
+-         <div id="renderNote" class="notice-box">
+-           Renders run through FFmpeg on the server: per-scene captions and overlays, transitions, and background music are all applied automatically.
+-         </div>
+-+        <div id="renderPreview" class="render-preview hidden"></div>
+-         <div id="renderJobs" class="render-jobs"></div>
+-       </div>
+-     </div>
+-diff --git a/js/app.js b/js/app.js
+-index 2b4b786..e68bf63 100644
+---- a/js/app.js
+-+++ b/js/app.js
+-@@ -24,7 +24,7 @@ import {
+-   removeProductionAsset, startRenderPoller,
+-   toggleCaptionsEnabled, regenerateCaptions,
+-   toggleIncludeInShort, addOverlay, removeOverlay,
+--  saveMusicSettings, saveMixSettings
+-+  saveMusicSettings, saveMixSettings, runAutopilot
+- } from "./production.js";
+- 
+- // ─── Initialization ───────────────────────────────────────────────────────────
+-@@ -274,6 +274,7 @@ document.querySelectorAll(".production-tab").forEach(btn =>
+-   btn.addEventListener("click", () => switchProductionTab(btn.dataset.tab))
+- );
+- document.querySelector("#prepareRenderBtn").addEventListener("click",    createRenderJob);
+-+document.querySelector("#runAutopilotBtn").addEventListener("click",     runAutopilot);
+- document.querySelector("#downloadManifestBtn").addEventListener("click", downloadManifest);
+- document.querySelector("#saveMusicSettingsBtn").addEventListener("click", saveMusicSettings);
+- document.querySelector("#saveMixSettingsBtn").addEventListener("click",   saveMixSettings);
+-diff --git a/js/production.js b/js/production.js
+-index 272b3c7..cd4dad2 100644
+---- a/js/production.js
+-+++ b/js/production.js
+-@@ -79,6 +79,7 @@ function populateProductionStudio(story) {
+-   _renderRenderManifest(story);
+-   switchProductionTab("timeline");
+-   refreshRenderJobs();
+-+  refreshAutopilotStatus();
+- }
+- 
+- // ---------- Tab switching ----------
+-@@ -309,6 +310,43 @@ function _renderRenderJobsList(jobs) {
+-       </div>
+-       <div class="meta">${job.progress ?? 0}%</div>
+-     </article>`).join("");
+-+
+-+  // Show a preview player for the most recently completed render.
+-+  const preview  = document.querySelector("#renderPreview");
+-+  const finished = jobs.find(j => j.status === "done" && j.outputUrl);
+-+  if (finished) {
+-+    preview.classList.remove("hidden");
+-+    preview.innerHTML = `
+-+      <div class="meta" style="margin-bottom:8px">Preview — ${escapeHtml(finished.presetLabel || finished.format)}</div>
+-+      <video controls preload="metadata" src="${escapeHtml(finished.outputUrl)}"></video>`;
+-+  } else {
+-+    preview.classList.add("hidden");
+-+    preview.innerHTML = "";
+-+  }
+-+}
+-+
+-+function _renderAutopilotStatus(job) {
+-+  const box = document.querySelector("#autopilotStatus");
+-+  const btn = document.querySelector("#runAutopilotBtn");
+-+  if (!job) { box.classList.add("hidden"); box.innerHTML = ""; return; }
+-+
+-+  box.classList.remove("hidden");
+-+  const running = job.status === "running" || job.status === "queued";
+-+  btn.disabled = running;
+-+  btn.textContent = running ? "Autopilot running…" : "✨ Run Autopilot";
+-+
+-+  const stageLabel = {
+-+    queued: "Queued…", "checking angle": "Checking editorial angle…",
+-+    "writing script": "Writing script…", rendering: "Rendering final video…", complete: "Done."
+-+  }[job.stage] || `Working — ${job.stage || "starting"}…`;
+-+
+-+  box.innerHTML = `
+-+    <div><strong>${job.status === "error" ? "Autopilot stopped" : job.status === "done" ? "Autopilot complete" : "Autopilot"}</strong> — ${escapeHtml(stageLabel)}</div>
+-+    ${job.error ? `<div style="color:var(--danger);margin-top:6px">${escapeHtml(job.error)}</div>` : ""}
+-+    ${(job.warnings || []).length
+-+      ? `<div style="color:var(--warning,#b58900);margin-top:6px">${job.warnings.map(escapeHtml).join(" · ")}</div>`
+-+      : ""}
+-+    ${job.status === "done" ? `<div class="meta" style="margin-top:6px">Check the Render tab to preview and, when you're happy with it, publish.</div>` : ""}`;
+- }
+- 
+- // ---------- Render jobs ----------
+-@@ -348,9 +386,37 @@ export function startRenderPoller() {
+-     const modal = document.querySelector("#productionStudioModal");
+-     if (!modal || modal.classList.contains("hidden")) return;
+-     await refreshRenderJobs();
+-+    await refreshAutopilotStatus();
+-   }, 3000);
+- }
+- 
+-+// ---------- Autopilot ----------
+-+
+-+export async function refreshAutopilotStatus() {
+-+  if (!activeProductionStory) return;
+-+  try {
+-+    const jobs = await api(`/api/stories/${encodeURIComponent(activeProductionStory.id)}/autopilot`);
+-+    _renderAutopilotStatus(jobs[0] || null);
+-+    // A finished autopilot run produces a new render job — refresh that list too.
+-+    if (jobs[0]?.status === "done" || jobs[0]?.status === "error") await refreshRenderJobs();
+-+  } catch (error) {
+-+    console.warn("Autopilot poll failed:", error.message);
+-+  }
+-+}
+-+
+-+export async function runAutopilot() {
+-+  if (!activeProductionStory) return;
+-+  try {
+-+    await api(`/api/stories/${encodeURIComponent(activeProductionStory.id)}/autopilot`, {
+-+      method: "POST", body: JSON.stringify({})
+-+    });
+-+    showToast("Autopilot started.");
+-+    await refreshAutopilotStatus();
+-+  } catch (error) {
+-+    showToast(`Autopilot failed to start: ${error.message}`);
+-+  }
+-+}
+-+
+- // ---------- Asset upload (general b-roll, unassigned) ----------
+- 
+- export async function handleAssetFiles(files) {
+-diff --git a/logs/2026-08-20-autopilot.md b/logs/2026-08-20-autopilot.md
+-new file mode 100644
+-index 0000000..8d6ed57
+---- /dev/null
+-+++ b/logs/2026-08-20-autopilot.md
+-@@ -0,0 +1,101 @@
+-+# 2026-08-20 — Autopilot (hands-off script → voiceover → visuals → render)
+-+
+-+## Objective
+-+User wants a one-click "hands-off" path: pick a story, and have script,
+-+voiceover, visuals, and a rendered video ready to preview — with posting
+-+still a manual step.
+-+
+-+## Files changed
+-+- `backend/server.js`
+-+- `backend/.env.example` (new)
+-+- `backend/README.md`
+-+- `index.html`
+-+- `js/production.js`
+-+- `js/app.js`
+-+- `styles.css`
+-+
+-+## What was implemented
+-+1. **`registerProductionAsset()`** — extracted the asset-registration logic
+-+   (duration probing, scene-timing/caption side effects, music-mix side
+-+   effects) that previously lived only inside the manual upload route into
+-+   a shared function, so both manual uploads and the new auto-fill paths
+-+   go through identical logic. No behavior change for manual uploads.
+-+2. **`synthesizeVoiceover(text, destPath)`** — calls the Google Cloud
+-+   Text-to-Speech REST API (`GOOGLE_TTS_API_KEY`, voice configurable via
+-+   `GOOGLE_TTS_VOICE`, defaults to `en-US-Neural2-D`). Scripts are well
+-+   under the 5,000-byte per-request limit, so no chunking needed at this
+-+   app's scale.
+-+3. **`fetchStockFootage(query, destPath)`** — searches Pexels Videos
+-+   (`PEXELS_API_KEY`) by a query built from the scene's on-screen text /
+-+   title, picks the largest MP4 up to 1920px wide, downloads it.
+-+4. **Per-scene auto endpoints** (also usable standalone, not just via
+-+   Autopilot):
+-+   - `POST /api/stories/:id/script/scenes/:sceneId/voiceover/auto`
+-+   - `POST /api/stories/:id/script/scenes/:sceneId/visual/auto`
+-+5. **`runAutopilot(jobId)`** — the orchestrator. Sequence: verify an
+-+   approved angle exists (hard requirement — Autopilot refuses to run
+-+   without one, see rationale below) → generate script/scenes if missing →
+-+   for each scene missing a voiceover asset, synthesize one → for each
+-+   scene missing a footage asset, fetch stock footage → queue a long-form
+-+   render job via the existing `_runRender` → mark the autopilot job
+-+   done/error once the render finishes. Scenes that already have
+-+   creator-uploaded footage/voiceover are left untouched. Per-scene
+-+   failures (e.g. no stock match, TTS quota) are collected as warnings on
+-+   the job rather than aborting the whole run.
+-+6. **`POST` / `GET /api/stories/:id/autopilot`** — start and poll an
+-+   autopilot job. Jobs are tracked in a new `store.autopilotJobs` array,
+-+   same pattern as `renderJobs`.
+-+7. **Frontend**: an "✨ Run Autopilot" button at the top of Production
+-+   Studio's Timeline tab, with a live status box (stage, warnings, errors)
+-+   polled every 3s alongside the existing render-job poller. On completion
+-+   the Render tab now shows an inline `<video>` preview player for the
+-+   most recent finished render (previously only a bare "Open rendered
+-+   video" link existed).
+-+8. Fixed a latent CSS bug found while touching this area: `.job-status`
+-+   had rules for `.completed`/`.failed`, but the backend has only ever
+-+   emitted `"done"`/`"error"` — those styles never matched anything.
+-+
+-+## What was intentionally not implemented
+-+- **No auto-selection of which story to run.** The user picks the story;
+-+  Autopilot doesn't scan and pick "today's story" on its own.
+-+- **Approved angle is a hard gate, not a suggestion.** Autopilot returns
+-+  400 and refuses to start without one. This preserves the one piece of
+-+  human editorial judgment (why this matters, developer impact) that
+-+  keeps AI-assisted content on the right side of YouTube's 2026
+-+  "inauthentic content" monetization policy — see the product conversation
+-+  in this session's transcript for sourcing. Everything downstream of the
+-+  angle is fine to automate; the angle itself is not.
+-+- **Publish is still manual.** Autopilot's last step is rendering, not
+-+  posting. No YouTube upload integration yet — flagged as a likely next
+-+  step once the user has used Autopilot enough to trust the output.
+-+- **No retry/backoff on TTS or Pexels calls.** A single failure per scene
+-+  is recorded as a warning and the pipeline moves on; the user can retry
+-+  an individual scene via the per-scene `/auto` endpoints without rerunning
+-+  the whole story.
+-+- **No .env loading built into `npm start`.** Node's built-in
+-+  `--env-file` flag is used instead of adding a `dotenv` dependency;
+-+  documented in `backend/README.md`. `npm start` (no env file) still works
+-+  for everything except Autopilot's TTS/stock-footage steps.
+-+
+-+## Bugs/issues found (not yet fixed)
+-+- (carried over from 2026-08-20-workflow-clarity-pass.md) Projects panel
+-+  progress % still doesn't sync with real story progress — Autopilot makes
+-+  this more visible since a story can now go from "New" to "rendered" in
+-+  one action while its Project card (if one exists) sits frozen at 5%.
+-+
+-+## Decisions made
+-+- Kept Autopilot entirely inside Production Studio rather than adding it
+-+  to the dashboard story cards, since it operates on a specific story's
+-+  scenes/assets and needs the same context Production Studio already
+-+  loads.
+-+- Chose Pexels over an AI video-generation API for the visuals gap,
+-+  per explicit user preference (free, fast, no per-clip generation cost —
+-+  trade-off is generic-looking b-roll rather than a custom "produced"
+-+  look). Revisit if the channel's visual style needs to change later.
+-+
+-+## Next step
+-+YouTube Data API upload integration (`videos.insert`) as the final manual
+-+"Publish" action once Autopilot output is trusted enough to ship straight
+-+from the preview player — quota is a non-issue at one video/day, and since
+-+this is a personal single-channel use case no Google app-review is needed,
+-+just OAuth self-authorization.
+-diff --git a/logs/2026-08-20-workflow-clarity-pass.md b/logs/2026-08-20-workflow-clarity-pass.md
+-new file mode 100644
+-index 0000000..fce5276
+---- /dev/null
+-+++ b/logs/2026-08-20-workflow-clarity-pass.md
+-@@ -0,0 +1,82 @@
+-+# 2026-08-20 — Workflow clarity pass
+-+
+-+## Objective
+-+User reported the app "technically works but the workflow is clunky/confusing."
+-+No functional bugs reported — this pass targets navigation and legibility of
+-+the Discover → Research → Script → Production pipeline, not new features.
+-+
+-+## Files changed
+-+- `index.html`
+-+- `js/app.js`
+-+- `js/research.js`
+-+- `js/script.js`
+-+- `js/production.js`
+-+- `js/ui.js`
+-+- `styles.css`
+-+- `backend/server.js`
+-+
+-+## What was implemented
+-+1. **Forward navigation between studios.** Previously each studio (Research /
+-+   Script / Production) was a dead-end modal — finishing a stage meant
+-+   closing the modal, going back to the dashboard, and finding the right
+-+   button on the story card to open the next one.
+-+   - Research Studio's Angles tab now has a "Continue to Script Studio →"
+-+     button, enabled once an angle is approved.
+-+   - Script Studio's Overview tab now has a "Continue to Production Studio →"
+-+     button, enabled once scenes exist.
+-+   - Both close the current modal and open the next one directly on the same
+-+     story — no manual re-navigation.
+-+
+-+2. **Empty-state CTA in Production Studio.** If a story has no script scenes
+-+   yet, the Timeline tab now shows a "Go to Script Studio →" button instead
+-+   of just a dead-end text notice.
+-+
+-+3. **Prerequisite notice in Script Studio.** If a story has no approved
+-+   angle yet, the Overview tab now surfaces a notice explaining that before
+-+   generating a script.
+-+
+-+4. **At-a-glance stage hints on story cards.** The dashboard's Research /
+-+   Script / Production buttons now each show a one-line status underneath
+-+   (e.g. "✓ angle approved", "6 scenes", "0/6 scenes ready", "needs a script
+-+   first") so users can tell where a story stands without opening every
+-+   modal to check.
+-+
+-+5. **Removed internal version numbers from user-facing UI.** Modal eyebrows
+-+   read "V4 · RESEARCH STUDIO", "V5 · SCRIPT STUDIO", "V8 · MEDIA ENGINE",
+-+   and the page title was "Akolis Tech Studio — V8" — these were internal
+-+   build/iteration labels (see CHANGELOG.md) leaking into the product. They
+-+   now read "RESEARCH STUDIO", "SCRIPT STUDIO", "PRODUCTION STUDIO". Fixed a
+-+   matching stale "V4" string in the backend startup log
+-+   (`backend/server.js`).
+-+
+-+## What was intentionally not implemented
+-+- Buttons on the story card (Research/Script/Production) are still always
+-+  clickable regardless of stage — they were NOT disabled/gated. Advanced
+-+  users who want to jump around or re-edit an earlier stage out of order can
+-+  still do so; the new empty-state/prerequisite notices handle the confusing
+-+  case without removing that flexibility.
+-+- The Projects panel still tracks its own separate `progress`/`status` field
+-+  that does not sync with story.research/script/production progress. This is
+-+  a real second source of truth on the dashboard and is worth resolving, but
+-+  is a bigger structural change than this pass covered — flagged for a
+-+  future session.
+-+- The "manual" source type has no feed-refresh handling in the backend
+-+  (adding a manual source currently does nothing on refresh). Not touched
+-+  this session — flagged as a gap.
+-+
+-+## Bugs/issues found (not yet fixed)
+-+- Manual source type is a dead option in Source Manager (see above).
+-+- Project progress % is static after creation (stuck at whatever it was set
+-+  to on creation) and never reflects actual story progress.
+-+
+-+## Decisions made
+-+- Chose non-blocking guidance (empty states + hints) over disabling buttons,
+-+  to avoid breaking flexibility for users editing stages out of order.
+-+- Kept the internal V-numbering scheme in CHANGELOG.md and code comments
+-+  (useful for dev history) but removed it from anything rendered to the end
+-+  user.
+-+
+-+## Next step
+-+Decide whether to unify Projects with story progress (single source of
+-+truth), or treat Projects as a separate lightweight index and just stop
+-+double-tracking progress on it.
+-diff --git a/styles.css b/styles.css
+-index 2ee64e7..509eaf6 100644
+---- a/styles.css
+-+++ b/styles.css
+-@@ -414,6 +414,15 @@ label { display: grid; gap: 7px; color: #d2d9e2; font-size: .9rem; }
+- .job-status { font-weight: 800; font-size: .76rem; text-transform: uppercase; letter-spacing: .05em; }
+- .job-status.queued { color: var(--warning); }
+- .job-status.processing { color: var(--accent); }
+--.job-status.completed { color: var(--success); }
+--.job-status.failed { color: var(--danger); }
+-+.job-status.done { color: var(--success); }
+-+.job-status.error { color: var(--danger); }
+- .job-link { color: #9dc7ff; text-decoration: none; }
+-+.autopilot-box {
+-+  display: flex; align-items: center; justify-content: space-between; gap: 16px;
+-+  background: var(--panel-3); border: 1px solid var(--border); border-radius: 12px;
+-+  padding: 14px 16px; margin-bottom: 14px;
+-+}
+-+.autopilot-box .primary-btn { white-space: nowrap; }
+-+@media (max-width: 780px) { .autopilot-box { flex-direction: column; align-items: stretch; } }
+-+.render-preview { margin-top: 16px; }
+-+.render-preview video { width: 100%; max-height: 420px; border-radius: 12px; border: 1px solid var(--border); background: #000; }
+diff --git a/changes.patch b/changes.patch
+deleted file mode 100644
+index fa6678f..0000000
+--- a/changes.patch
++++ /dev/null
+@@ -1,275 +0,0 @@
+-diff --git a/CHANGELOG.md b/CHANGELOG.md
+-index 9db6548..79410a5 100644
+---- a/CHANGELOG.md
+-+++ b/CHANGELOG.md
+-@@ -1,5 +1,15 @@
+- # Changelog
+- 
+-+## 2026-08-20 — Workflow clarity pass
+-+
+-+### Changed
+-+
+-+- Research Studio, Script Studio, and Production Studio are no longer navigational dead ends: approving an angle now surfaces a "Continue to Script Studio" action, and generating a script surfaces a "Continue to Production Studio" action, each jumping directly into the next stage for the same story.
+-+- Production Studio's Timeline tab shows a "Go to Script Studio" action when a story has no scenes yet, instead of a plain notice.
+-+- Script Studio's Overview tab surfaces a notice when a story has no approved angle yet.
+-+- Story cards on the dashboard now show a one-line status hint under each of the Research/Script/Production buttons (e.g. "✓ angle approved", "6 scenes", "2/6 scenes ready") so progress is visible without opening a modal.
+-+- Removed internal version numbers (`V4`, `V5`, `V8 · MEDIA ENGINE`) from user-facing modal headers and the page title; fixed a matching stale `V4` string in the backend startup log.
+-+
+- ## 2026-08-17 — V8 Content-Aware Media Engine
+- 
+- ### Added
+-diff --git a/backend/server.js b/backend/server.js
+-index 911f57b..e82b05b 100644
+---- a/backend/server.js
+-+++ b/backend/server.js
+-@@ -1045,4 +1045,4 @@ http.createServer(async (req, res) => {
+-     console.error(error);
+-     json(res, 500, { error: "Internal server error", detail: error.message });
+-   }
+--}).listen(PORT, () => console.log(`Akolis Tech Studio V4 running at http://localhost:${PORT}`));
+-+}).listen(PORT, () => console.log(`Akolis Tech Studio API running at http://localhost:${PORT}`));
+-diff --git a/index.html b/index.html
+-index debd6a7..756afc0 100644
+---- a/index.html
+-+++ b/index.html
+-@@ -3,7 +3,7 @@
+- <head>
+-   <meta charset="UTF-8">
+-   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+--  <title>Akolis Tech Studio — V8</title>
+-+  <title>Akolis Tech Studio</title>
+-   <meta name="description" content="Personal faceless-tech content intelligence and production dashboard.">
+-   <link rel="stylesheet" href="styles.css">
+- </head>
+-@@ -164,7 +164,7 @@
+-       <button class="close-btn" data-close="researchStudioModal" aria-label="Close">×</button>
+-       <div class="research-header">
+-         <div>
+--          <span class="eyebrow">V4 · RESEARCH STUDIO</span>
+-+          <span class="eyebrow">RESEARCH STUDIO</span>
+-           <h2 id="researchTitle">Research Story</h2>
+-           <p id="researchSubtitle" class="modal-subtitle"></p>
+-         </div>
+-@@ -241,7 +241,10 @@
+-         <div class="approved-angle">
+-           <strong>Approved angle</strong>
+-           <textarea id="approvedAngle" placeholder="Your final editorial angle"></textarea>
+--          <button id="saveAngleBtn" class="primary-btn">Approve & Save Angle</button>
+-+          <div class="modal-actions">
+-+            <button id="saveAngleBtn" class="primary-btn">Approve & Save Angle</button>
+-+            <button id="continueToScriptBtn" class="secondary-btn" disabled>Continue to Script Studio →</button>
+-+          </div>
+-         </div>
+-       </div>
+-     </div>
+-@@ -252,7 +255,7 @@
+-     <div class="modal-card script-wide">
+-       <button class="close-btn" data-close="scriptStudioModal" aria-label="Close">×</button>
+-       <div class="research-header">
+--        <div><span class="eyebrow">V5 · SCRIPT STUDIO</span><h2 id="scriptTitle">Script Studio</h2><p id="scriptSubtitle" class="modal-subtitle"></p></div>
+-+        <div><span class="eyebrow">SCRIPT STUDIO</span><h2 id="scriptTitle">Script Studio</h2><p id="scriptSubtitle" class="modal-subtitle"></p></div>
+-         <div class="research-score" id="scriptDuration">—</div>
+-       </div>
+-       <div class="research-tabs">
+-@@ -269,8 +272,9 @@
+-           <div class="detail-block"><strong>Target duration (minutes)</strong><input id="scriptTargetMinutes" type="number" min="1" max="30" step="0.5" value="7"></div>
+-           <div class="detail-block"><strong>Voice / tone</strong><select id="scriptTone"><option value="clear-analytical">Clear & analytical</option><option value="fast-news">Fast tech-news</option><option value="conversational">Conversational</option><option value="documentary">Documentary</option></select></div>
+-         </div>
+--        <div class="modal-actions"><button id="saveScriptSettingsBtn" class="secondary-btn">Save Settings</button><button id="generateScriptBtn" class="primary-btn">Generate Script Package</button></div>
+-+        <div class="modal-actions"><button id="saveScriptSettingsBtn" class="secondary-btn">Save Settings</button><button id="generateScriptBtn" class="primary-btn">Generate Script Package</button><button id="continueToProductionBtn" class="secondary-btn" disabled>Continue to Production Studio →</button></div>
+-         <div id="scriptGenerationNote" class="notice-box"></div>
+-+        <div id="scriptPrereqNotice" class="notice-box hidden"></div>
+-       </div>
+-       <div id="scriptPanelScript" class="script-panel hidden">
+-         <div class="script-toolbar"><span class="meta" id="scriptWordCount"></span><span class="meta" id="scriptReadTime"></span><button id="saveScriptBtn" class="secondary-btn">Save Script</button></div>
+-@@ -281,7 +285,7 @@
+-       </div>
+-       <div id="scriptPanelScenes" class="script-panel hidden"><div class="scene-toolbar"><button id="addSceneBtn" class="secondary-btn">+ Add Scene</button><button id="regenerateScenesBtn" class="secondary-btn">Regenerate Scene Plan</button></div><div id="sceneList" class="scene-list"></div></div>
+-       <div id="scriptPanelAssets" class="script-panel hidden"><div class="asset-summary" id="assetSummary"></div><div id="assetChecklist" class="asset-checklist"></div></div>
+--      <div id="scriptPanelPrompts" class="script-panel hidden"><p class="meta">Prompts are prepared for manual use in Google Flow. V5 does not automate Flow.</p><div id="flowPromptList" class="flow-prompt-list"></div></div>
+-+      <div id="scriptPanelPrompts" class="script-panel hidden"><p class="meta">Prompts are prepared for manual use in Google Flow. This step does not automate Flow.</p><div id="flowPromptList" class="flow-prompt-list"></div></div>
+-     </div>
+-   </div>
+-   <div id="productionStudioModal" class="modal hidden" aria-hidden="true">
+-@@ -290,7 +294,7 @@
+- 
+-       <div class="research-header">
+-         <div>
+--          <span class="eyebrow">V8 · MEDIA ENGINE</span>
+-+          <span class="eyebrow">PRODUCTION STUDIO</span>
+-           <h2 id="productionTitle">Production Studio</h2>
+-           <p id="productionSubtitle" class="modal-subtitle"></p>
+-         </div>
+-diff --git a/js/app.js b/js/app.js
+-index 500e67e..2b4b786 100644
+---- a/js/app.js
+-+++ b/js/app.js
+-@@ -221,6 +221,12 @@ document.querySelector("#addResearchSourceBtn").addEventListener("click", addRes
+- document.querySelector("#addClaimBtn").addEventListener("click",        addClaim);
+- document.querySelector("#generateAnglesBtn").addEventListener("click",  generateAngles);
+- document.querySelector("#saveAngleBtn").addEventListener("click",       saveAngle);
+-+document.querySelector("#continueToScriptBtn").addEventListener("click", async e => {
+-+  const storyId = e.target.dataset.storyId;
+-+  if (!storyId) return;
+-+  closeModal("researchStudioModal");
+-+  await openScriptStudio(storyId);
+-+});
+- document.querySelector("#researchSourceList").addEventListener("click", async e => {
+-   const btn = e.target.closest(".remove-research-source");
+-   if (btn) await removeResearchSource(btn.dataset.id);
+-@@ -240,6 +246,12 @@ document.querySelector("#generateScriptBtn").addEventListener("click",    genera
+- document.querySelector("#saveScriptBtn").addEventListener("click",        saveScript);
+- document.querySelector("#regenerateScenesBtn").addEventListener("click",  regenerateScenes);
+- document.querySelector("#addSceneBtn").addEventListener("click",          addScene);
+-+document.querySelector("#continueToProductionBtn").addEventListener("click", async e => {
+-+  const storyId = e.target.dataset.storyId;
+-+  if (!storyId) return;
+-+  closeModal("scriptStudioModal");
+-+  await openProductionStudio(storyId);
+-+});
+- document.querySelector("#sceneList").addEventListener("change", e => {
+-   if (e.target.classList.contains("scene-field"))
+-     saveSceneField(Number(e.target.dataset.i), e.target.dataset.k, e.target.value);
+-@@ -329,7 +341,13 @@ document.querySelector("#productionStudioModal").addEventListener("click", async
+-   const addOverlayBtn   = e.target.closest(".add-overlay-btn");
+-   const removeOverlayBtn = e.target.closest(".remove-overlay-btn");
+-   const removeAsset     = e.target.closest(".delete-asset-btn");
+-+  const goToScript      = e.target.closest(".go-to-script-btn");
+- 
+-+  if (goToScript) {
+-+    closeModal("productionStudioModal");
+-+    await openScriptStudio(goToScript.dataset.story);
+-+    return;
+-+  }
+-   if (attachFootage) {
+-     const input = document.querySelector("#sceneFootageFileInput");
+-     input.dataset.sceneId = attachFootage.dataset.scene;
+-diff --git a/js/production.js b/js/production.js
+-index 2c5e0b5..272b3c7 100644
+---- a/js/production.js
+-+++ b/js/production.js
+-@@ -100,7 +100,11 @@ function _renderProductionScenes(story) {
+-   const scenes = storyScenes(story);
+- 
+-   if (!scenes.length) {
+--    list.innerHTML = `<div class="empty">No script scenes yet. Generate the script package first.</div>`;
+-+    list.innerHTML = `
+-+      <div class="empty">
+-+        <p>No script scenes yet. Scenes come from Script Studio — generate the script package there first.</p>
+-+        <button class="primary-btn go-to-script-btn" data-story="${escapeHtml(story.id)}">Go to Script Studio →</button>
+-+      </div>`;
+-     return;
+-   }
+- 
+-diff --git a/js/research.js b/js/research.js
+-index 8ce7f84..b805d91 100644
+---- a/js/research.js
+-+++ b/js/research.js
+-@@ -40,6 +40,10 @@ function populateResearchStudio(story) {
+-   document.querySelector("#researchCaveats").value         = brief.caveats         || "";
+-   document.querySelector("#approvedAngle").value           = story.research?.approvedAngle || story.angle || "";
+- 
+-+  const continueBtn = document.querySelector("#continueToScriptBtn");
+-+  continueBtn.disabled = !(story.research?.approvedAngle || story.angle);
+-+  continueBtn.dataset.storyId = story.id;
+-+
+-   _renderResearchSources(story);
+-   _renderClaims(story);
+-   _renderAngles(story);
+-@@ -233,6 +237,7 @@ export async function saveAngle() {
+-     activeResearchStory = updated;
+-     cacheStory(updated);
+-     renderAll();
+-+    document.querySelector("#continueToScriptBtn").disabled = false;
+-     showToast("Editorial angle approved.");
+-   } catch (error) { showToast(error.message); }
+- }
+-diff --git a/js/script.js b/js/script.js
+-index 6bc41b8..be8e773 100644
+---- a/js/script.js
+-+++ b/js/script.js
+-@@ -51,6 +51,15 @@ export function populateScriptStudio(story) {
+-     ? `Last generated: ${formatDate(script.generatedAt)}`
+-     : "No script package generated yet.";
+- 
+-+  const hasAngle = !!(story.research?.approvedAngle || story.angle);
+-+  const prereq = document.querySelector("#scriptPrereqNotice");
+-+  prereq.classList.toggle("hidden", hasAngle);
+-+  if (!hasAngle) prereq.textContent = "No approved editorial angle yet — head back to Research Studio and approve one before generating a script.";
+-+
+-+  const hasScenes = (script.scenes || []).length > 0;
+-+  document.querySelector("#continueToProductionBtn").disabled = !hasScenes;
+-+  document.querySelector("#continueToProductionBtn").dataset.storyId = story.id;
+-+
+-   _renderScenes(story);
+-   _renderAssets(story);
+-   _renderFlowPrompts(story);
+-diff --git a/js/ui.js b/js/ui.js
+-index ad4cedb..d2d6e7a 100644
+---- a/js/ui.js
+-+++ b/js/ui.js
+-@@ -42,7 +42,16 @@ export function renderStories() {
+-     .sort((a, b) => (b.score || 0) - (a.score || 0));
+- 
+-   list.innerHTML = stories.length
+--    ? stories.map(story => `
+-+    ? stories.map(story => {
+-+        const hasAngle  = !!(story.research?.approvedAngle || story.angle);
+-+        const sceneCount = story.script?.scenes?.length || 0;
+-+        const readyScenes = sceneCount
+-+          ? story.script.scenes.filter(s =>
+-+              (story.production?.assets || []).some(a => a.role === "footage" && a.sceneId === s.id) &&
+-+              (story.production?.assets || []).some(a => a.role === "voiceover" && a.sceneId === s.id)
+-+            ).length
+-+          : 0;
+-+        return `
+-         <article class="story-card">
+-           <div>
+-             <div class="story-title">${escapeHtml(story.title)}</div>
+-@@ -58,11 +67,21 @@ export function renderStories() {
+-           </div>
+-           <div class="story-actions">
+-             <div class="score">${story.score ?? "—"}/100</div>
+--            <button class="secondary-btn research-story"   data-id="${story.id}">Research</button>
+--            <button class="primary-btn   script-story"     data-id="${story.id}">Script</button>
+--            <button class="secondary-btn production-story" data-id="${story.id}">Production</button>
+-+            <div class="stage-btn">
+-+              <button class="secondary-btn research-story" data-id="${story.id}">Research</button>
+-+              <span class="stage-hint">${hasAngle ? "✓ angle approved" : "not started"}</span>
+-+            </div>
+-+            <div class="stage-btn">
+-+              <button class="primary-btn script-story" data-id="${story.id}">Script</button>
+-+              <span class="stage-hint">${sceneCount ? `${sceneCount} scenes` : (hasAngle ? "ready to generate" : "needs an angle first")}</span>
+-+            </div>
+-+            <div class="stage-btn">
+-+              <button class="secondary-btn production-story" data-id="${story.id}">Production</button>
+-+              <span class="stage-hint">${sceneCount ? `${readyScenes}/${sceneCount} scenes ready` : "needs a script first"}</span>
+-+            </div>
+-           </div>
+--        </article>`).join("")
+-+        </article>`;
+-+      }).join("")
+-     : `<div class="empty">No stories match your filters. Try refreshing feeds.</div>`;
+- }
+- 
+-diff --git a/styles.css b/styles.css
+-index 78f64b6..2ee64e7 100644
+---- a/styles.css
+-+++ b/styles.css
+-@@ -159,6 +159,8 @@ textarea { min-height: 110px; resize: vertical; }
+- }
+- .score { color: var(--success); font-weight: 850; font-size: 1.1rem; }
+- .story-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+-+.stage-btn { display: flex; flex-direction: column; align-items: center; gap: 3px; }
+-+.stage-hint { font-size: .68rem; color: var(--muted); white-space: nowrap; }
+- 
+- .source-card {
+-   display: grid;
+-@@ -251,6 +253,7 @@ label { display: grid; gap: 7px; color: #d2d9e2; font-size: .9rem; }
+- }
+- 
+- .empty { color: var(--muted); padding: 20px 0; }
+-+.empty p { margin: 0 0 12px; }
+- 
+- .toast {
+-   position: fixed;
+diff --git a/edge-tts-swap.patch b/edge-tts-swap.patch
+deleted file mode 100644
+index 7a4ce41..0000000
+--- a/edge-tts-swap.patch
++++ /dev/null
+@@ -1,663 +0,0 @@
+-diff --git a/CHANGELOG.md b/CHANGELOG.md
+-index eea1ab1..e30b8d4 100644
+---- a/CHANGELOG.md
+-+++ b/CHANGELOG.md
+-@@ -1,5 +1,13 @@
+- # Changelog
+- 
+-+## 2026-08-21 — Swap voiceover provider to Edge TTS
+-+
+-+### Changed
+-+
+-+- `synthesizeVoiceover()` (used by Autopilot and the per-scene voiceover-auto endpoint) now runs on Microsoft Edge's TTS service via `@travisvn/edge-tts` instead of Google Cloud Text-to-Speech. No API key or billing account required — unblocks Autopilot immediately for anyone who hasn't set up Google Cloud billing.
+-+- New env var `EDGE_TTS_VOICE` (optional, defaults to `en-US-EmmaMultilingualNeural`) replaces `GOOGLE_TTS_API_KEY` / `GOOGLE_TTS_VOICE`.
+-+- `backend/.env.example` and `backend/README.md` updated accordingly.
+-+
+- ## 2026-08-20 — Autopilot
+- 
+- ### Added
+-diff --git a/backend/.env.example b/backend/.env.example
+-index a2397ee..b3aa12d 100644
+---- a/backend/.env.example
+-+++ b/backend/.env.example
+-@@ -1,16 +1,13 @@
+--# Copy this file to .env and fill in your own keys. Never commit .env.
+-+# Copy this file to .env and fill in your own values. Never commit .env.
+- # Node loads it automatically if you start the server with:
+- #   node --env-file=.env server.js
+- 
+--# Google Cloud Text-to-Speech — used by Autopilot to generate scene voiceover.
+--# Free tier: 4M chars/month (Standard), 1M chars/month (WaveNet/Neural2/Chirp3).
+--# Get a key: https://console.cloud.google.com/apis/credentials
+--# (enable the "Cloud Text-to-Speech API" on your project first)
+--GOOGLE_TTS_API_KEY=
+--
+--# Optional — defaults to en-US-Neural2-D if not set.
+--# Browse voices: https://cloud.google.com/text-to-speech/docs/voices
+--GOOGLE_TTS_VOICE=en-US-Neural2-D
+-+# Voiceover — runs on Microsoft Edge's TTS service via the @travisvn/edge-tts
+-+# package. No API key, no billing account, nothing to sign up for.
+-+# Optional — defaults to en-US-EmmaMultilingualNeural if not set.
+-+# See other voice options by calling listVoices() from that package, or
+-+# just try a different name from https://github.com/travisvn/edge-tts
+-+EDGE_TTS_VOICE=en-US-EmmaMultilingualNeural
+- 
+- # Pexels — used by Autopilot to fetch stock b-roll for scenes with no
+- # footage of your own attached. Free, no card required.
+-diff --git a/backend/README.md b/backend/README.md
+-index 5204cb0..d9f7426 100644
+---- a/backend/README.md
+-+++ b/backend/README.md
+-@@ -38,16 +38,25 @@ per-scene stock footage — then renders, all from one click in Production
+- Studio's Timeline tab. It never overwrites footage/voiceover you've already
+- attached yourself.
+- 
+-+Voiceover needs no setup at all — it runs on Microsoft Edge's TTS service
+-+(no API key, no billing account). Stock footage needs one free key:
+-+
+- 1. Copy `.env.example` to `.env`.
+--2. Fill in `GOOGLE_TTS_API_KEY` (Google Cloud Text-to-Speech — has a
+--   recurring monthly free tier, see `.env.example` for details) and
+--   `PEXELS_API_KEY` (free, no card required).
+-+2. Fill in `PEXELS_API_KEY` (free, no card required — https://www.pexels.com/api/).
+- 3. Start the server with `node --env-file=.env server.js` instead of
+--   `npm start` so the keys are loaded.
+--
+--Without either key set, Autopilot still runs — it'll write the script and
+--attempt the render, but scenes missing voiceover/footage will show up as
+--warnings on the job instead of silently failing.
+-+   `npm start` so the key is loaded.
+-+
+-+Without `PEXELS_API_KEY` set, Autopilot still runs — it'll write the script,
+-+generate voiceover, and attempt the render, but scenes with no footage of
+-+their own will show up as warnings on the job instead of silently failing.
+-+
+-+Note on voiceover: it goes through the `@travisvn/edge-tts` package, which
+-+talks to an unofficial, unpublished Microsoft endpoint (the same one behind
+-+Edge's built-in "Read Aloud"). It's free and has been reliable in practice,
+-+but — unlike a published API — Microsoft could change that endpoint without
+-+notice. If narration generation ever starts failing across the board, that's
+-+the first thing to check; swapping in a different TTS provider only means
+-+changing the body of `synthesizeVoiceover()` in `server.js`.
+- 
+- ## Media endpoints
+- 
+-diff --git a/backend/package-lock.json b/backend/package-lock.json
+-index 4595f04..635548e 100644
+---- a/backend/package-lock.json
+-+++ b/backend/package-lock.json
+-@@ -8,10 +8,76 @@
+-       "name": "akolis-tech-studio-api",
+-       "version": "0.7.0",
+-       "dependencies": {
+-+        "@travisvn/edge-tts": "^1.0.2",
+-         "busboy": "^1.6.0",
+-         "rss-parser": "^3.13.0"
+-       }
+-     },
+-+    "node_modules/@travisvn/edge-tts": {
+-+      "version": "1.0.2",
+-+      "resolved": "https://registry.npmjs.org/@travisvn/edge-tts/-/edge-tts-1.0.2.tgz",
+-+      "integrity": "sha512-afwl0QYFF0vdxXCwK2j5h+m6py1wJ3mp3Ao8FzD6EYTYAbvhf3WYN9Unr4Tbnp25YsvyiCrMMnZXNx2peacwLQ==",
+-+      "license": "AGPL-3.0",
+-+      "dependencies": {
+-+        "axios": "^1.4.0",
+-+        "https-proxy-agent": "^7.0.6",
+-+        "uuid": "^11.1.0",
+-+        "ws": "^8.13.0",
+-+        "xml-escape": "^1.1.0"
+-+      }
+-+    },
+-+    "node_modules/agent-base": {
+-+      "version": "7.1.4",
+-+      "resolved": "https://registry.npmjs.org/agent-base/-/agent-base-7.1.4.tgz",
+-+      "integrity": "sha512-MnA+YT8fwfJPgBx3m60MNqakm30XOkyIoH1y6huTQvC0PwZG7ki8NacLBcrPbNoo8vEZy7Jpuk7+jMO+CUovTQ==",
+-+      "license": "MIT",
+-+      "engines": {
+-+        "node": ">= 14"
+-+      }
+-+    },
+-+    "node_modules/asynckit": {
+-+      "version": "0.4.0",
+-+      "resolved": "https://registry.npmjs.org/asynckit/-/asynckit-0.4.0.tgz",
+-+      "integrity": "sha512-Oei9OH4tRh0YqU3GxhX79dM/mwVgvbZJaSNaRk+bshkj0S5cfHcgYakreBjrHwatXKbz+IoIdYLxrKim2MjW0Q==",
+-+      "license": "MIT"
+-+    },
+-+    "node_modules/axios": {
+-+      "version": "1.19.0",
+-+      "resolved": "https://registry.npmjs.org/axios/-/axios-1.19.0.tgz",
+-+      "integrity": "sha512-ht/iuYZXEjFxLH/Hkezgd7m6JKlHHXEUSneaDz8uZe1Gj5QZtCnpyDsckvAiEnT89OEbCLmnte4R4sn7P0EKFw==",
+-+      "license": "MIT",
+-+      "dependencies": {
+-+        "follow-redirects": "^1.16.0",
+-+        "form-data": "^4.0.6",
+-+        "https-proxy-agent": "^5.0.1",
+-+        "proxy-from-env": "^2.1.0"
+-+      }
+-+    },
+-+    "node_modules/axios/node_modules/agent-base": {
+-+      "version": "6.0.2",
+-+      "resolved": "https://registry.npmjs.org/agent-base/-/agent-base-6.0.2.tgz",
+-+      "integrity": "sha512-RZNwNclF7+MS/8bDg70amg32dyeZGZxiDuQmZxKLAlQjr3jGyLx+4Kkk58UO7D2QdgFIQCovuSuZESne6RG6XQ==",
+-+      "license": "MIT",
+-+      "dependencies": {
+-+        "debug": "4"
+-+      },
+-+      "engines": {
+-+        "node": ">= 6.0.0"
+-+      }
+-+    },
+-+    "node_modules/axios/node_modules/https-proxy-agent": {
+-+      "version": "5.0.1",
+-+      "resolved": "https://registry.npmjs.org/https-proxy-agent/-/https-proxy-agent-5.0.1.tgz",
+-+      "integrity": "sha512-dFcAjpTQFgoLMzC2VwU+C/CbS7uRL0lWmxDITmqm7C+7F0Odmj6s9l6alZc6AELXhrnggM2CeWSXHGOdX2YtwA==",
+-+      "license": "MIT",
+-+      "dependencies": {
+-+        "agent-base": "6",
+-+        "debug": "4"
+-+      },
+-+      "engines": {
+-+        "node": ">= 6"
+-+      }
+-+    },
+-     "node_modules/busboy": {
+-       "version": "1.6.0",
+-       "resolved": "https://registry.npmjs.org/busboy/-/busboy-1.6.0.tgz",
+-@@ -23,6 +89,71 @@
+-         "node": ">=10.16.0"
+-       }
+-     },
+-+    "node_modules/call-bind-apply-helpers": {
+-+      "version": "1.0.2",
+-+      "resolved": "https://registry.npmjs.org/call-bind-apply-helpers/-/call-bind-apply-helpers-1.0.2.tgz",
+-+      "integrity": "sha512-Sp1ablJ0ivDkSzjcaJdxEunN5/XvksFJ2sMBFfq6x0ryhQV/2b/KwFe21cMpmHtPOSij8K99/wSfoEuTObmuMQ==",
+-+      "license": "MIT",
+-+      "dependencies": {
+-+        "es-errors": "^1.3.0",
+-+        "function-bind": "^1.1.2"
+-+      },
+-+      "engines": {
+-+        "node": ">= 0.4"
+-+      }
+-+    },
+-+    "node_modules/combined-stream": {
+-+      "version": "1.0.8",
+-+      "resolved": "https://registry.npmjs.org/combined-stream/-/combined-stream-1.0.8.tgz",
+-+      "integrity": "sha512-FQN4MRfuJeHf7cBbBMJFXhKSDq+2kAArBlmRBvcvFE5BB1HZKXtSFASDhdlz9zOYwxh8lDdnvmMOe/+5cdoEdg==",
+-+      "license": "MIT",
+-+      "dependencies": {
+-+        "delayed-stream": "~1.0.0"
+-+      },
+-+      "engines": {
+-+        "node": ">= 0.8"
+-+      }
+-+    },
+-+    "node_modules/debug": {
+-+      "version": "4.4.3",
+-+      "resolved": "https://registry.npmjs.org/debug/-/debug-4.4.3.tgz",
+-+      "integrity": "sha512-RGwwWnwQvkVfavKVt22FGLw+xYSdzARwm0ru6DhTVA3umU5hZc28V3kO4stgYryrTlLpuvgI9GiijltAjNbcqA==",
+-+      "license": "MIT",
+-+      "dependencies": {
+-+        "ms": "^2.1.3"
+-+      },
+-+      "engines": {
+-+        "node": ">=6.0"
+-+      },
+-+      "peerDependenciesMeta": {
+-+        "supports-color": {
+-+          "optional": true
+-+        }
+-+      }
+-+    },
+-+    "node_modules/delayed-stream": {
+-+      "version": "1.0.0",
+-+      "resolved": "https://registry.npmjs.org/delayed-stream/-/delayed-stream-1.0.0.tgz",
+-+      "integrity": "sha512-ZySD7Nf91aLB0RxL4KGrKHBXl7Eds1DAmEdcoVawXnLD7SDhpNgtuII2aAkg7a7QS41jxPSZ17p4VdGnMHk3MQ==",
+-+      "license": "MIT",
+-+      "engines": {
+-+        "node": ">=0.4.0"
+-+      }
+-+    },
+-+    "node_modules/dunder-proto": {
+-+      "version": "1.0.1",
+-+      "resolved": "https://registry.npmjs.org/dunder-proto/-/dunder-proto-1.0.1.tgz",
+-+      "integrity": "sha512-KIN/nDJBQRcXw0MLVhZE9iQHmG68qAVIBg9CqmUYjmQIhgij9U5MFvrqkUL5FbtyyzZuOeOt0zdeRe4UY7ct+A==",
+-+      "license": "MIT",
+-+      "dependencies": {
+-+        "call-bind-apply-helpers": "^1.0.1",
+-+        "es-errors": "^1.3.0",
+-+        "gopd": "^1.2.0"
+-+      },
+-+      "engines": {
+-+        "node": ">= 0.4"
+-+      }
+-+    },
+-     "node_modules/entities": {
+-       "version": "2.2.0",
+-       "resolved": "https://registry.npmjs.org/entities/-/entities-2.2.0.tgz",
+-@@ -32,6 +163,242 @@
+-         "url": "https://github.com/fb55/entities?sponsor=1"
+-       }
+-     },
+-+    "node_modules/es-define-property": {
+-+      "version": "1.0.1",
+-+      "resolved": "https://registry.npmjs.org/es-define-property/-/es-define-property-1.0.1.tgz",
+-+      "integrity": "sha512-e3nRfgfUZ4rNGL232gUgX06QNyyez04KdjFrF+LTRoOXmrOgFKDg4BCdsjW8EnT69eqdYGmRpJwiPVYNrCaW3g==",
+-+      "license": "MIT",
+-+      "engines": {
+-+        "node": ">= 0.4"
+-+      }
+-+    },
+-+    "node_modules/es-errors": {
+-+      "version": "1.3.0",
+-+      "resolved": "https://registry.npmjs.org/es-errors/-/es-errors-1.3.0.tgz",
+-+      "integrity": "sha512-Zf5H2Kxt2xjTvbJvP2ZWLEICxA6j+hAmMzIlypy4xcBg1vKVnx89Wy0GbS+kf5cwCVFFzdCFh2XSCFNULS6csw==",
+-+      "license": "MIT",
+-+      "engines": {
+-+        "node": ">= 0.4"
+-+      }
+-+    },
+-+    "node_modules/es-object-atoms": {
+-+      "version": "1.1.2",
+-+      "resolved": "https://registry.npmjs.org/es-object-atoms/-/es-object-atoms-1.1.2.tgz",
+-+      "integrity": "sha512-HWcBoN6NileqtSydK2FqHbS/LoDd2pqrnQHLyJzBj4kOp/ky2MWMN694xOfkK8/SnUsW2DH7EfyVlydKCsm1Zw==",
+-+      "license": "MIT",
+-+      "dependencies": {
+-+        "es-errors": "^1.3.0"
+-+      },
+-+      "engines": {
+-+        "node": ">= 0.4"
+-+      }
+-+    },
+-+    "node_modules/es-set-tostringtag": {
+-+      "version": "2.1.0",
+-+      "resolved": "https://registry.npmjs.org/es-set-tostringtag/-/es-set-tostringtag-2.1.0.tgz",
+-+      "integrity": "sha512-j6vWzfrGVfyXxge+O0x5sh6cvxAog0a/4Rdd2K36zCMV5eJ+/+tOAngRO8cODMNWbVRdVlmGZQL2YS3yR8bIUA==",
+-+      "license": "MIT",
+-+      "dependencies": {
+-+        "es-errors": "^1.3.0",
+-+        "get-intrinsic": "^1.2.6",
+-+        "has-tostringtag": "^1.0.2",
+-+        "hasown": "^2.0.2"
+-+      },
+-+      "engines": {
+-+        "node": ">= 0.4"
+-+      }
+-+    },
+-+    "node_modules/follow-redirects": {
+-+      "version": "1.16.0",
+-+      "resolved": "https://registry.npmjs.org/follow-redirects/-/follow-redirects-1.16.0.tgz",
+-+      "integrity": "sha512-y5rN/uOsadFT/JfYwhxRS5R7Qce+g3zG97+JrtFZlC9klX/W5hD7iiLzScI4nZqUS7DNUdhPgw4xI8W2LuXlUw==",
+-+      "funding": [
+-+        {
+-+          "type": "individual",
+-+          "url": "https://github.com/sponsors/RubenVerborgh"
+-+        }
+-+      ],
+-+      "license": "MIT",
+-+      "engines": {
+-+        "node": ">=4.0"
+-+      },
+-+      "peerDependenciesMeta": {
+-+        "debug": {
+-+          "optional": true
+-+        }
+-+      }
+-+    },
+-+    "node_modules/form-data": {
+-+      "version": "4.0.6",
+-+      "resolved": "https://registry.npmjs.org/form-data/-/form-data-4.0.6.tgz",
+-+      "integrity": "sha512-vKatAh4SlVfgbv+YtmhiRjhEMJsYpsG1Y2rMQtR+SVSbytsSD1YGzDIcrAJmdFec88u/+VoGmxnl+80gL1tRCQ==",
+-+      "license": "MIT",
+-+      "dependencies": {
+-+        "asynckit": "^0.4.0",
+-+        "combined-stream": "^1.0.8",
+-+        "es-set-tostringtag": "^2.1.0",
+-+        "hasown": "^2.0.4",
+-+        "mime-types": "^2.1.35"
+-+      },
+-+      "engines": {
+-+        "node": ">= 6"
+-+      }
+-+    },
+-+    "node_modules/function-bind": {
+-+      "version": "1.1.2",
+-+      "resolved": "https://registry.npmjs.org/function-bind/-/function-bind-1.1.2.tgz",
+-+      "integrity": "sha512-7XHNxH7qX9xG5mIwxkhumTox/MIRNcOgDrxWsMt2pAr23WHp6MrRlN7FBSFpCpr+oVO0F744iUgR82nJMfG2SA==",
+-+      "license": "MIT",
+-+      "funding": {
+-+        "url": "https://github.com/sponsors/ljharb"
+-+      }
+-+    },
+-+    "node_modules/get-intrinsic": {
+-+      "version": "1.3.0",
+-+      "resolved": "https://registry.npmjs.org/get-intrinsic/-/get-intrinsic-1.3.0.tgz",
+-+      "integrity": "sha512-9fSjSaos/fRIVIp+xSJlE6lfwhES7LNtKaCBIamHsjr2na1BiABJPo0mOjjz8GJDURarmCPGqaiVg5mfjb98CQ==",
+-+      "license": "MIT",
+-+      "dependencies": {
+-+        "call-bind-apply-helpers": "^1.0.2",
+-+        "es-define-property": "^1.0.1",
+-+        "es-errors": "^1.3.0",
+-+        "es-object-atoms": "^1.1.1",
+-+        "function-bind": "^1.1.2",
+-+        "get-proto": "^1.0.1",
+-+        "gopd": "^1.2.0",
+-+        "has-symbols": "^1.1.0",
+-+        "hasown": "^2.0.2",
+-+        "math-intrinsics": "^1.1.0"
+-+      },
+-+      "engines": {
+-+        "node": ">= 0.4"
+-+      },
+-+      "funding": {
+-+        "url": "https://github.com/sponsors/ljharb"
+-+      }
+-+    },
+-+    "node_modules/get-proto": {
+-+      "version": "1.0.1",
+-+      "resolved": "https://registry.npmjs.org/get-proto/-/get-proto-1.0.1.tgz",
+-+      "integrity": "sha512-sTSfBjoXBp89JvIKIefqw7U2CCebsc74kiY6awiGogKtoSGbgjYE/G/+l9sF3MWFPNc9IcoOC4ODfKHfxFmp0g==",
+-+      "license": "MIT",
+-+      "dependencies": {
+-+        "dunder-proto": "^1.0.1",
+-+        "es-object-atoms": "^1.0.0"
+-+      },
+-+      "engines": {
+-+        "node": ">= 0.4"
+-+      }
+-+    },
+-+    "node_modules/gopd": {
+-+      "version": "1.2.0",
+-+      "resolved": "https://registry.npmjs.org/gopd/-/gopd-1.2.0.tgz",
+-+      "integrity": "sha512-ZUKRh6/kUFoAiTAtTYPZJ3hw9wNxx+BIBOijnlG9PnrJsCcSjs1wyyD6vJpaYtgnzDrKYRSqf3OO6Rfa93xsRg==",
+-+      "license": "MIT",
+-+      "engines": {
+-+        "node": ">= 0.4"
+-+      },
+-+      "funding": {
+-+        "url": "https://github.com/sponsors/ljharb"
+-+      }
+-+    },
+-+    "node_modules/has-symbols": {
+-+      "version": "1.1.0",
+-+      "resolved": "https://registry.npmjs.org/has-symbols/-/has-symbols-1.1.0.tgz",
+-+      "integrity": "sha512-1cDNdwJ2Jaohmb3sg4OmKaMBwuC48sYni5HUw2DvsC8LjGTLK9h+eb1X6RyuOHe4hT0ULCW68iomhjUoKUqlPQ==",
+-+      "license": "MIT",
+-+      "engines": {
+-+        "node": ">= 0.4"
+-+      },
+-+      "funding": {
+-+        "url": "https://github.com/sponsors/ljharb"
+-+      }
+-+    },
+-+    "node_modules/has-tostringtag": {
+-+      "version": "1.0.2",
+-+      "resolved": "https://registry.npmjs.org/has-tostringtag/-/has-tostringtag-1.0.2.tgz",
+-+      "integrity": "sha512-NqADB8VjPFLM2V0VvHUewwwsw0ZWBaIdgo+ieHtK3hasLz4qeCRjYcqfB6AQrBggRKppKF8L52/VqdVsO47Dlw==",
+-+      "license": "MIT",
+-+      "dependencies": {
+-+        "has-symbols": "^1.0.3"
+-+      },
+-+      "engines": {
+-+        "node": ">= 0.4"
+-+      },
+-+      "funding": {
+-+        "url": "https://github.com/sponsors/ljharb"
+-+      }
+-+    },
+-+    "node_modules/hasown": {
+-+      "version": "2.0.4",
+-+      "resolved": "https://registry.npmjs.org/hasown/-/hasown-2.0.4.tgz",
+-+      "integrity": "sha512-T2UbfbBEF32wiepXIsMlTW9+dDYC6wMh/t/vYA4tuOMKqWz/n3vr1NFSxQiyP+zk2mXsoMA/i/7qV6LKut1t1A==",
+-+      "license": "MIT",
+-+      "dependencies": {
+-+        "function-bind": "^1.1.2"
+-+      },
+-+      "engines": {
+-+        "node": ">= 0.4"
+-+      }
+-+    },
+-+    "node_modules/https-proxy-agent": {
+-+      "version": "7.0.6",
+-+      "resolved": "https://registry.npmjs.org/https-proxy-agent/-/https-proxy-agent-7.0.6.tgz",
+-+      "integrity": "sha512-vK9P5/iUfdl95AI+JVyUuIcVtd4ofvtrOr3HNtM2yxC9bnMbEdp3x01OhQNnjb8IJYi38VlTE3mBXwcfvywuSw==",
+-+      "license": "MIT",
+-+      "dependencies": {
+-+        "agent-base": "^7.1.2",
+-+        "debug": "4"
+-+      },
+-+      "engines": {
+-+        "node": ">= 14"
+-+      }
+-+    },
+-+    "node_modules/math-intrinsics": {
+-+      "version": "1.1.0",
+-+      "resolved": "https://registry.npmjs.org/math-intrinsics/-/math-intrinsics-1.1.0.tgz",
+-+      "integrity": "sha512-/IXtbwEk5HTPyEwyKX6hGkYXxM9nbj64B+ilVJnC/R6B0pH5G4V3b0pVbL7DBj4tkhBAppbQUlf6F6Xl9LHu1g==",
+-+      "license": "MIT",
+-+      "engines": {
+-+        "node": ">= 0.4"
+-+      }
+-+    },
+-+    "node_modules/mime-db": {
+-+      "version": "1.52.0",
+-+      "resolved": "https://registry.npmjs.org/mime-db/-/mime-db-1.52.0.tgz",
+-+      "integrity": "sha512-sPU4uV7dYlvtWJxwwxHD0PuihVNiE7TyAbQ5SWxDCB9mUYvOgroQOwYQQOKPJ8CIbE+1ETVlOoK1UC2nU3gYvg==",
+-+      "license": "MIT",
+-+      "engines": {
+-+        "node": ">= 0.6"
+-+      }
+-+    },
+-+    "node_modules/mime-types": {
+-+      "version": "2.1.35",
+-+      "resolved": "https://registry.npmjs.org/mime-types/-/mime-types-2.1.35.tgz",
+-+      "integrity": "sha512-ZDY+bPm5zTTF+YpCrAU9nK0UgICYPT0QtT1NZWFv4s++TNkcgVaT0g6+4R2uI4MjQjzysHB1zxuWL50hzaeXiw==",
+-+      "license": "MIT",
+-+      "dependencies": {
+-+        "mime-db": "1.52.0"
+-+      },
+-+      "engines": {
+-+        "node": ">= 0.6"
+-+      }
+-+    },
+-+    "node_modules/ms": {
+-+      "version": "2.1.3",
+-+      "resolved": "https://registry.npmjs.org/ms/-/ms-2.1.3.tgz",
+-+      "integrity": "sha512-6FlzubTLZG3J2a/NVCAleEhjzq5oxgHyaCU9yYXvcLsvoVaHJq/s5xXI6/XXP6tz7R9xAOtHnSO/tXtF3WRTlA==",
+-+      "license": "MIT"
+-+    },
+-+    "node_modules/proxy-from-env": {
+-+      "version": "2.1.0",
+-+      "resolved": "https://registry.npmjs.org/proxy-from-env/-/proxy-from-env-2.1.0.tgz",
+-+      "integrity": "sha512-cJ+oHTW1VAEa8cJslgmUZrc+sjRKgAKl3Zyse6+PV38hZe/V6Z14TbCuXcan9F9ghlz4QrFr2c92TNF82UkYHA==",
+-+      "license": "MIT",
+-+      "engines": {
+-+        "node": ">=10"
+-+      }
+-+    },
+-     "node_modules/rss-parser": {
+-       "version": "3.13.0",
+-       "resolved": "https://registry.npmjs.org/rss-parser/-/rss-parser-3.13.0.tgz",
+-@@ -59,6 +426,46 @@
+-         "node": ">=10.0.0"
+-       }
+-     },
+-+    "node_modules/uuid": {
+-+      "version": "11.1.1",
+-+      "resolved": "https://registry.npmjs.org/uuid/-/uuid-11.1.1.tgz",
+-+      "integrity": "sha512-vIYxrBCC/N/K+Js3qSN88go7kIfNPssr/hHCesKCQNAjmgvYS2oqr69kIufEG+O4+PfezOH4EbIeHCfFov8ZgQ==",
+-+      "funding": [
+-+        "https://github.com/sponsors/broofa",
+-+        "https://github.com/sponsors/ctavan"
+-+      ],
+-+      "license": "MIT",
+-+      "bin": {
+-+        "uuid": "dist/esm/bin/uuid"
+-+      }
+-+    },
+-+    "node_modules/ws": {
+-+      "version": "8.21.3",
+-+      "resolved": "https://registry.npmjs.org/ws/-/ws-8.21.3.tgz",
+-+      "integrity": "sha512-201TZ/kPWxoPr/OKWjquZR1SWKXcvxdH+e1xrx89b3YbmzLMFCLfnaG1HFIgWzJOEWZ7MvpK++odZufgYR50Rw==",
+-+      "license": "MIT",
+-+      "engines": {
+-+        "node": ">=10.0.0"
+-+      },
+-+      "peerDependencies": {
+-+        "bufferutil": "^4.0.1",
+-+        "utf-8-validate": ">=5.0.2"
+-+      },
+-+      "peerDependenciesMeta": {
+-+        "bufferutil": {
+-+          "optional": true
+-+        },
+-+        "utf-8-validate": {
+-+          "optional": true
+-+        }
+-+      }
+-+    },
+-+    "node_modules/xml-escape": {
+-+      "version": "1.1.0",
+-+      "resolved": "https://registry.npmjs.org/xml-escape/-/xml-escape-1.1.0.tgz",
+-+      "integrity": "sha512-B/T4sDK8Z6aUh/qNr7mjKAwwncIljFuUP+DO/D5hloYFj+90O88z8Wf7oSucZTHxBAsC1/CTP4rtx/x1Uf72Mg==",
+-+      "license": "MIT License"
+-+    },
+-     "node_modules/xml2js": {
+-       "version": "0.5.0",
+-       "resolved": "https://registry.npmjs.org/xml2js/-/xml2js-0.5.0.tgz",
+-diff --git a/backend/package.json b/backend/package.json
+-index 66acf06..4c67499 100644
+---- a/backend/package.json
+-+++ b/backend/package.json
+-@@ -8,6 +8,7 @@
+-     "dev": "node --watch server.js"
+-   },
+-   "dependencies": {
+-+    "@travisvn/edge-tts": "^1.0.2",
+-     "busboy": "^1.6.0",
+-     "rss-parser": "^3.13.0"
+-   }
+-diff --git a/backend/server.js b/backend/server.js
+-index c7c245e..34ec899 100644
+---- a/backend/server.js
+-+++ b/backend/server.js
+-@@ -8,6 +8,7 @@ import { execFile } from "node:child_process";
+- import { promisify } from "node:util";
+- import Parser from "rss-parser";
+- import Busboy from "busboy";
+-+import { EdgeTTS } from "@travisvn/edge-tts";
+- 
+- const execFileAsync = promisify(execFile);
+- 
+-@@ -283,32 +284,26 @@ async function registerProductionAsset(story, storyId, {
+-   return asset;
+- }
+- 
+--// Synthesizes narration audio for a single scene via the Google Cloud
+--// Text-to-Speech REST API. Requires GOOGLE_TTS_API_KEY; voice defaults to
+--// GOOGLE_TTS_VOICE or "en-US-Neural2-D". Scripts are well under the 5,000
+--// byte per-request limit, so no chunking is needed at this app's scale.
+-+// Synthesizes narration audio for a single scene using Microsoft Edge's
+-+// online neural TTS service (via the unofficial @travisvn/edge-tts client).
+-+// No API key or billing account required. This talks to an internal,
+-+// unofficial Microsoft endpoint rather than a published/supported API —
+-+// it's free and reliable in practice, but could break without notice if
+-+// Microsoft changes that endpoint. Voice defaults to EDGE_TTS_VOICE or
+-+// "en-US-EmmaMultilingualNeural"; see the full voice list via the
+-+// package's listVoices() helper if you want to pick a different one.
+- async function synthesizeVoiceover(text, destPath) {
+--  const apiKey = process.env.GOOGLE_TTS_API_KEY;
+--  if (!apiKey) throw new Error("GOOGLE_TTS_API_KEY is not configured on the server.");
+--  const voiceName    = process.env.GOOGLE_TTS_VOICE || "en-US-Neural2-D";
+--  const languageCode = voiceName.split("-").slice(0, 2).join("-") || "en-US";
+--
+--  const response = await fetch(`https://texttospeech.googleapis.com/v1/text:synthesize?key=${apiKey}`, {
+--    method: "POST",
+--    headers: { "Content-Type": "application/json" },
+--    body: JSON.stringify({
+--      input:       { text },
+--      voice:       { languageCode, name: voiceName },
+--      audioConfig: { audioEncoding: "MP3" }
+--    })
+--  });
+--  if (!response.ok) {
+--    const errText = await response.text().catch(() => "");
+--    throw new Error(`Google TTS request failed (${response.status}): ${errText.slice(0, 200)}`);
+-+  const voice = process.env.EDGE_TTS_VOICE || "en-US-EmmaMultilingualNeural";
+-+  const tts = new EdgeTTS(text, voice);
+-+  let result;
+-+  try {
+-+    result = await tts.synthesize();
+-+  } catch (error) {
+-+    throw new Error(`Edge TTS request failed: ${error.message}`);
+-   }
+--  const data = await response.json();
+--  if (!data.audioContent) throw new Error("Google TTS returned no audio content.");
+--  await fs.writeFile(destPath, Buffer.from(data.audioContent, "base64"));
+-+  const buffer = Buffer.from(await result.audio.arrayBuffer());
+-+  if (!buffer.length) throw new Error("Edge TTS returned no audio content.");
+-+  await fs.writeFile(destPath, buffer);
+- }
+- 
+- // Fetches a stock b-roll clip matching a text query via the Pexels Videos
+-diff --git a/logs/2026-08-21-edge-tts-swap.md b/logs/2026-08-21-edge-tts-swap.md
+-new file mode 100644
+-index 0000000..804bdb6
+---- /dev/null
+-+++ b/logs/2026-08-21-edge-tts-swap.md
+-@@ -0,0 +1,55 @@
+-+# 2026-08-21 — Swap voiceover provider to Edge TTS
+-+
+-+## Objective
+-+User got stuck setting up Google Cloud billing (required to activate Cloud
+-+TTS even within its free tier) and needed an unblocked path to keep testing
+-+Autopilot without waiting on that.
+-+
+-+## Files changed
+-+- `backend/server.js`
+-+- `backend/package.json`
+-+- `backend/.env.example`
+-+- `backend/README.md`
+-+- `CHANGELOG.md`
+-+
+-+## What was implemented
+-+Replaced the Google Cloud TTS REST call inside `synthesizeVoiceover()` with
+-+the `@travisvn/edge-tts` npm package, which talks to Microsoft Edge's online
+-+TTS service. No API key, no billing account, nothing to sign up for. Same
+-+function signature, same call sites (Autopilot and the per-scene
+-+`/voiceover/auto` endpoint) — nothing else in the pipeline changed.
+-+
+-+`EDGE_TTS_VOICE` env var replaces `GOOGLE_TTS_API_KEY`/`GOOGLE_TTS_VOICE`,
+-+defaulting to `en-US-EmmaMultilingualNeural`.
+-+
+-+## What was intentionally not implemented
+-+- Did not build a pluggable multi-provider abstraction (e.g. `TTS_PROVIDER=
+-+  google|edge`) to keep both options live side by side. Given the user
+-+  explicitly asked to avoid complexity, this is a straight swap. Google TTS
+-+  can be reinstated later by restoring the previous `synthesizeVoiceover()`
+-+  body (see CHANGELOG.md 2026-08-20 entry / git history) if its higher
+-+  reliability/SLA becomes worth the billing setup.
+-+
+-+## Bugs/issues found (not yet fixed)
+-+- None new. Carried-over items unchanged (see 2026-08-20 logs).
+-+
+-+## Decisions made
+-+- Chose `@travisvn/edge-tts` over alternatives (Azure free tier, ElevenLabs
+-+  free tier, self-hosted Piper/Coqui) because it requires zero account setup
+-+  of any kind — directly matches "unblock me right now" — at the cost of
+-+  relying on an unofficial, unpublished Microsoft endpoint rather than a
+-+  supported API. Documented that trade-off in `backend/README.md` so it's
+-+  not a surprise if narration generation ever breaks across the board.
+-+- Could not live-test the actual network round-trip to Microsoft's TTS
+-+  endpoint from the sandbox this change was built in (its outbound network
+-+  allowlist only covers package registries, not arbitrary API hosts).
+-+  Verified instead: the package installs cleanly, its type definitions match
+-+  exactly how `synthesizeVoiceover()` calls it, and the integration code
+-+  follows the package's own documented usage pattern. This will make a real
+-+  network call the first time it runs in the user's own environment.
+-+
+-+## Next step
+-+Once the user has generated a few real voiceovers this way, revisit whether
+-+the default voice (`en-US-EmmaMultilingualNeural`) suits the channel's tone,
+-+or whether to make voice selection a per-story setting in Script Studio
+-+instead of a single global env var.
+diff --git a/index.html b/index.html
+index cc0b63a..9d17c66 100644
+--- a/index.html
++++ b/index.html
+@@ -245,6 +245,7 @@
+             <button id="saveAngleBtn" class="primary-btn">Approve & Save Angle</button>
+             <button id="continueToScriptBtn" class="secondary-btn" disabled>Continue to Script Studio →</button>
+           </div>
++          <p id="angleHint" class="meta hint-text"></p>
+         </div>
+       </div>
+     </div>
+@@ -273,6 +274,7 @@
+           <div class="detail-block"><strong>Voice / tone</strong><select id="scriptTone"><option value="clear-analytical">Clear & analytical</option><option value="fast-news">Fast tech-news</option><option value="conversational">Conversational</option><option value="documentary">Documentary</option></select></div>
+         </div>
+         <div class="modal-actions"><button id="saveScriptSettingsBtn" class="secondary-btn">Save Settings</button><button id="generateScriptBtn" class="primary-btn">Generate Script Package</button><button id="continueToProductionBtn" class="secondary-btn" disabled>Continue to Production Studio →</button></div>
++        <p id="scriptContinueHint" class="meta hint-text"></p>
+         <div id="scriptGenerationNote" class="notice-box"></div>
+         <div id="scriptPrereqNotice" class="notice-box hidden"></div>
+       </div>
+@@ -314,7 +316,7 @@
+             <strong>Autopilot</strong>
+             <p class="meta" style="margin:4px 0 0">
+               One click: writes the script if it's missing, generates voiceover for any scene without one
+-              (Google TTS), fills in stock footage for any scene without your own clip (Pexels), then renders.
++              (Edge TTS, free), fills in stock footage for any scene without your own clip (Pexels), then renders.
+               Your own uploaded footage/voiceover is never replaced. Publishing stays manual.
+             </p>
+           </div>
+diff --git a/js/research.js b/js/research.js
+index b805d91..c5a13e1 100644
+--- a/js/research.js
++++ b/js/research.js
+@@ -41,8 +41,12 @@ function populateResearchStudio(story) {
+   document.querySelector("#approvedAngle").value           = story.research?.approvedAngle || story.angle || "";
+ 
+   const continueBtn = document.querySelector("#continueToScriptBtn");
+-  continueBtn.disabled = !(story.research?.approvedAngle || story.angle);
++  const hasApprovedAngle = !!(story.research?.approvedAngle || story.angle);
++  continueBtn.disabled = !hasApprovedAngle;
+   continueBtn.dataset.storyId = story.id;
++  document.querySelector("#angleHint").textContent = hasApprovedAngle
++    ? ""
++    : "Write or generate an angle above, then click \"Approve & Save Angle\" — that's what unlocks Continue to Script Studio. Saving the brief on other tabs doesn't count.";
+ 
+   _renderResearchSources(story);
+   _renderClaims(story);
+@@ -238,6 +242,7 @@ export async function saveAngle() {
+     cacheStory(updated);
+     renderAll();
+     document.querySelector("#continueToScriptBtn").disabled = false;
++    document.querySelector("#angleHint").textContent = "";
+     showToast("Editorial angle approved.");
+   } catch (error) { showToast(error.message); }
+ }
+diff --git a/js/script.js b/js/script.js
+index be8e773..04cffdb 100644
+--- a/js/script.js
++++ b/js/script.js
+@@ -59,6 +59,9 @@ export function populateScriptStudio(story) {
+   const hasScenes = (script.scenes || []).length > 0;
+   document.querySelector("#continueToProductionBtn").disabled = !hasScenes;
+   document.querySelector("#continueToProductionBtn").dataset.storyId = story.id;
++  document.querySelector("#scriptContinueHint").textContent = hasScenes
++    ? ""
++    : "Click \"Generate Script Package\" above — that's what creates scenes and unlocks Continue to Production Studio. Saving settings alone doesn't count.";
+ 
+   _renderScenes(story);
+   _renderAssets(story);
+diff --git a/styles.css b/styles.css
+index 509eaf6..aac9e35 100644
+--- a/styles.css
++++ b/styles.css
+@@ -254,6 +254,8 @@ label { display: grid; gap: 7px; color: #d2d9e2; font-size: .9rem; }
+ 
+ .empty { color: var(--muted); padding: 20px 0; }
+ .empty p { margin: 0 0 12px; }
++.hint-text { margin-top: 8px; min-height: 1.1em; }
++.hint-text:not(:empty) { color: var(--warning, #b58900); }
+ 
+ .toast {
+   position: fixed;
